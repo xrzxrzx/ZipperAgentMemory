@@ -17,3 +17,6 @@ Thumbs.db
 # 记忆库数据（如有本地样例）
 memory/*.db
 memory/**/*.db
+
+# 记忆库索引（derived state，可随时 rebuild；放 memory/ 同级，不入 git）
+.zipper-agent-memory.index.sqlite*
