@@ -3,18 +3,18 @@
 > 更新规则：每次阶段结束/重要决策后更新本文件，保持为「当前事实」，不保留历史（历史见 git）。
 
 - 更新日期：2026-08-22
-- 当前阶段：**阶段 3 进行中** —— 阶段 2 验收通过（6/6），MCP server 编码中
+- 当前阶段：**阶段 4 派发准备** —— 阶段 3 验收通过（7/7），git 集成与迁移即将开始
 
 ## 里程碑
 
 - ✅ **设计批准**（2026-08-21 全批准）：MCP 方案 A、autocommit 默认关、设计 v1.0
 - ✅ **本地 Go 升级**：1.24.5 → 1.26.7
-- ✅ **阶段 0 完成**：Go 骨架（docs/验收/阶段0.md）
-- ✅ **阶段 1 完成**：pkg/memory 核心 + zam CLI（docs/验收/阶段1.md）；修复 Windows junction 逃逸，规范 §5.1 同步
-- ✅ **阶段 2 完成**：pkg/index（FTS5/WAL/CJK）+ pkg/watch（fsnotify 去抖）+ memoryd serve/rebuild/search；**内存 11.84MB、空闲 CPU 0 秒**（docs/验收/阶段2.md）
-  - 依赖：modernc.org/sqlite v1.57.0、fsnotify v1.10.1（设计 §3.2 已批准）
-- ⏳ **阶段 3 进行中**：MCP server（官方 go-sdk v1.7.x，6 tools，serve HTTP + stdio 双模式）子 Agent 5dedc809
-- ✅ **推送恢复**：GitHub 瞬时故障已恢复，阶段 2 全部 7 commits + 状态更新已同步（HEAD = e9df40f）
+- ✅ **阶段 0**：Go 骨架（docs/验收/阶段0.md）
+- ✅ **阶段 1**：pkg/memory + zam CLI；修复 Windows junction 逃逸（docs/验收/阶段1.md）
+- ✅ **阶段 2**：pkg/index（FTS5/WAL/CJK）+ pkg/watch；内存 11.84MB、CPU 0 秒（docs/验收/阶段2.md）
+- ✅ **阶段 3**：MCP server 双模式——官方 go-sdk v1.7.0、6 tools 带行为标注、serve HTTP（127.0.0.1:8931）+ stdio、e2e 集成测试（docs/验收/阶段3.md）
+- ⏳ **阶段 4 即将派发**：git 集成（autocommit 默认关）+ 迁移脚本
+- ✅ 远端同步：HEAD = fe6bf94
 
 ## 项目定义
 
