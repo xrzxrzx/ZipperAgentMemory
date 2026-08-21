@@ -44,10 +44,15 @@
 
 ### 3.2 核心依赖
 
-- `fsnotify` — 目录变更监听（增量索引）
-- `modernc.org/sqlite` — SQLite，启用 FTS5 全文检索
-- `mark3labs/mcp-go` 或官方 go-sdk — MCP stdio server
-- `git` 命令调用（可选 autocommit，不内置 git 库）
+| 依赖 | 选型 | 说明 |
+|------|------|------|
+| MCP SDK | **官方 `modelcontextprotocol/go-sdk`**（锁定 v1.7.x） | Tier 1 认证、稳定版；见 `docs/research/mcp-go-sdk-选型.md` |
+| 文件监听 | `fsnotify` | 目录变更监听（增量索引） |
+| SQLite | `modernc.org/sqlite` | 纯 Go 无 CGO，启用 FTS5 全文检索 + WAL 模式 |
+| git | 命令行调用 | 可选 autocommit，不内置 git 库 |
+
+> SDK 选型依据（调研结论摘要）：官方 go-sdk 为 Tier 1、v1.7.0 稳定版、2026-07-28 规范发布当天跟进；mark3labs/mcp-go 生态最大但刚进 v1.0.0-beta.1、曾有规范跟进滞后。本项目 6 个同步文件工具，官方版缺失的任务型工具/会话设施均无影响；关键路径写测试对冲风险。
+> 工程约束：**Go ≥ 1.25.0**（官方 go-sdk v1.7.x 的 go.mod 要求）；锁 v1.7.x 版本，升级走独立提交。
 
 ### 3.3 资源预算（硬约束）
 
@@ -81,6 +86,19 @@
 - **进程只做编排**：读写本质是文件操作，进程崩溃不丢数据（文件即真源）；
 - **索引可重建**：`memory/` 目录丢失索引文件无碍，进程可用 `--rebuild-index` 全量重建。
 
+### 4.1 MCP 传输形态（待用户拍板，见 §10）
+
+> 背景：basic-memory 走 stdio 按需拉起（客户端 spawn 进程、会话结束退出），**无常驻进程**；
+> 而本设计（你的需求）要求**常驻进程维护记忆**，二者需要调和。
+
+| 方案 | 形态 | 优点 | 缺点 |
+|------|------|------|------|
+| **A. 单常驻进程 + streamable HTTP**（推荐） | daemon 常驻，监听 `127.0.0.1:PORT`，客户端配置 MCP 指向 `http://127.0.0.1:PORT/mcp` | 真·常驻、一个进程、watcher 永不中断、索引始终热 | 客户端需支持 HTTP 传输（2026 年主流客户端均已支持） |
+| B. 常驻进程 + 薄 stdio 转发 | daemon 管 watcher/索引/git，另起 stdio 进程由客户端拉起，经本地 socket 转发 | 兼容纯 stdio 客户端 | 两个进程、复杂度高 |
+| C. 纯 stdio 按需（basic-memory 式） | 无守护进程，客户端拉起即工作 | 最简单 | 不符合「常驻」需求；无客户端连接时无人维护索引 |
+
+**推荐 A**：单一二进制 `zipper-agent-memoryd` 支持两种运行模式——`serve`（常驻 + HTTP，默认）与 `stdio`（按需拉起，供纯 stdio 客户端）；低资源下同时只跑一个实例。
+
 ## 5. 记忆库目录结构（Schema v1）
 
 ```
@@ -113,21 +131,25 @@ memory/                      ← 整个目录即 git 仓库
 
 ## 6. MCP 接口设计
 
-### 6.1 Tools（全部 `memory_` 前缀，蛇形命名）
+### 6.1 Tools（全部 `memory_` 前缀，蛇形命名，**带行为标注**）
 
-| Tool | 参数 | 说明 |
-|------|------|------|
-| `memory_read` | `path` | 读取文件内容（限制必须在 memory/ 内，防路径穿越） |
-| `memory_write` | `path, content, overwrite?` | 写入/新建文件；`overwrite=false` 时存在即报错（默认） |
-| `memory_append` | `path, content` | 追加内容（agent 沉淀用，自动加时间戳分隔） |
-| `memory_search` | `query, limit?` | FTS5 全文检索，返回 文件路径+命中片段 |
-| `memory_list` | `path?` | 列出目录下的文件/子目录 |
-| `memory_status` | — | 记忆库统计：文件数、总大小、最近变更 |
+> 行为标注借鉴 basic-memory：`readOnly`（只读）、`destructive`（删除/覆盖）、`idempotent`（可安全重试）。
+> 作用：帮助 agent 在调用前判断工具副作用，减少误操作（basic-memory 全工具标注，实践验证有效）。
+
+| Tool | 参数 | 行为 | 说明 |
+|------|------|------|------|
+| `memory_read` | `path` | readOnly | 读取文件内容（限制必须在 memory/ 内，防路径穿越） |
+| `memory_write` | `path, content, overwrite?` | destructive, idempotent | 写入/新建文件；`overwrite=false` 时存在即报错（默认） |
+| `memory_append` | `path, content` | destructive | 追加内容（agent 沉淀用，自动加时间戳分隔） |
+| `memory_search` | `query, limit?` | readOnly | FTS5 全文检索，返回 文件路径+命中片段 |
+| `memory_list` | `path?` | readOnly | 列出目录下的文件/子目录 |
+| `memory_status` | — | readOnly | 记忆库统计：文件数、总大小、最近变更 |
 
 ### 6.2 安全与并发
 
 - **路径沙箱**：所有 `path` 参数解析后必须落在 memory/ 根内，防穿越；
 - **并发写**：进程内互斥锁串行化写操作；文件写入采用「临时文件 + rename」原子替换；
+- **写链路稳定性是硬要求**（教训源自 basic-memory：move 孤儿 #1152、观察重复/死锁 #1214/#1213 均出在写入链路）：写操作必须原子、可恢复，禁止出现「文件写了但索引没更新/索引更新但文件没写」的半态；任何中途失败只能留下「可被 `--rebuild-index` 修复」的状态，且写入顺序固定为：临时文件 → rename → 索引；
 - **读不受锁影响**：只读文件，不阻塞。
 
 ### 6.3 事件与通知（v1 可选）
@@ -174,7 +196,7 @@ memory/                      ← 整个目录即 git 仓库
 
 | # | 风险/问题 | 应对 |
 |---|-----------|------|
-| R1 | MCP Go SDK 选型（mark3labs vs 官方） | 阶段 3 前做最小握手验证再定，写入阶段 3 任务书 |
+| R1 | MCP Go SDK 选型 | **已解决**：官方 `modelcontextprotocol/go-sdk` v1.7.x（Tier 1）；mark3labs 为备选 |
 | R2 | 多 Agent 并发写同一文件 | 进程级互斥 + 原子写；文档约定 agent 只写自己目录 |
 | R3 | Agent 自动沉淀格式失控 | 仅通过 `memory_append` 写入 agent/ 目录，格式由工具强约束 |
 | R4 | git 仓库随记忆增长膨胀 | autocommit 默认关闭；定期 `git gc` 提示写入手册 |
@@ -184,7 +206,8 @@ memory/                      ← 整个目录即 git 仓库
 
 ## 10. 待用户拍板事项
 
-1. **语言选型**：确认 Go（推荐）还是 C#；
-2. **项目名**：沿用目录名 `ZipperAgentMemory`（进程名 `zipper-agent-memoryd`）还是另起；
+1. ~~**语言选型**~~ → **已确认 Go**（D5）
+2. ~~**项目名**~~ → **已确认 ZipperAgentMemory**（D7）
 3. **git autocommit**：默认关闭（推荐）还是默认开启；
-4. 本设计文档整体批准或提出修改。
+4. **MCP 传输形态**（§4.1）：方案 A 单常驻 + streamable HTTP（推荐） / B 常驻 + stdio 转发 / C 纯 stdio 按需；
+5. 本设计文档整体批准或提出修改（当前 v0.1 + 调研增量）。
