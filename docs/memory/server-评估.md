@@ -11,8 +11,9 @@
 | 网络 | ✅ | proxy.golang.org HTTP 200（Go 依赖可拉取）；GitHub 连通性待部署时实测 |
 | 目录权限 | ✅ | /usr/local、/opt 可写（root） |
 | 工具 | ✅ | tar / wget / curl 已有；**zip / unzip 缺失**（迁移打包若用 zip 需补装，或用 tar） |
-| Go | ❌ | 未装；需求 **≥1.25**（官方 go-sdk v1.7.x 要求）。安装路径建议：`dnf install golang` 或官方 tarball → /usr/local/go |
-| git | ❌ | 未装；`dnf install git` 即可 |
+| Go（服务器） | ❌ | 未装；需求 **≥1.25**（官方 go-sdk v1.7.x 要求）。安装路径建议：`dnf install golang` 或官方 tarball → /usr/local/go |
+| git（服务器） | ❌ | 未装；`dnf install git` 即可 |
+| **Go（本地开发机）** | ⚠️ | **已装 1.24.5（windows/amd64）< 1.25 不满足 go-sdk 要求**；批准后开工前需升级本地 Go ≥1.25（DSH 子 Agent 在本地编译验收 `go build/test`） |
 
 ## 部署规划（阶段 4/5 执行，届时再装）
 
