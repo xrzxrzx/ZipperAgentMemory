@@ -3,17 +3,18 @@
 > 更新规则：每次阶段结束/重要决策后更新本文件，保持为「当前事实」，不保留历史（历史见 git）。
 
 - 更新日期：2026-08-22
-- 当前阶段：**阶段 2 派发准备** —— 阶段 1 验收通过（6/6），守护进程编码即将开始
+- 当前阶段：**阶段 3 进行中** —— 阶段 2 验收通过（6/6），MCP server 编码中
 
 ## 里程碑
 
 - ✅ **设计批准**（2026-08-21 全批准）：MCP 方案 A、autocommit 默认关、设计 v1.0
 - ✅ **本地 Go 升级**：1.24.5 → 1.26.7
-- ✅ **阶段 0 完成**：Go 骨架，5 项验收全过（docs/验收/阶段0.md）
-- ✅ **阶段 1 完成**：pkg/memory 核心 + zam CLI + memory/ 骨架，6 项验收全过（docs/验收/阶段1.md）
-  - 🛡️ **重要：修复 Windows junction 逃逸漏洞**（EvalSymlinks 不解析 junction → 组件级 Lstat+Readlink），编码规范 §5.1 已同步更新
-  - 提交：4a840f9（feat code）+ a00a805（docs）
-- ⏳ **阶段 2 即将派发**：watcher + SQLite FTS5 索引（子 Agent）
+- ✅ **阶段 0 完成**：Go 骨架（docs/验收/阶段0.md）
+- ✅ **阶段 1 完成**：pkg/memory 核心 + zam CLI（docs/验收/阶段1.md）；修复 Windows junction 逃逸，规范 §5.1 同步
+- ✅ **阶段 2 完成**：pkg/index（FTS5/WAL/CJK）+ pkg/watch（fsnotify 去抖）+ memoryd serve/rebuild/search；**内存 11.84MB、空闲 CPU 0 秒**（docs/验收/阶段2.md）
+  - 依赖：modernc.org/sqlite v1.57.0、fsnotify v1.10.1（设计 §3.2 已批准）
+- ⏳ **阶段 3 进行中**：MCP server（官方 go-sdk v1.7.x，6 tools，serve HTTP + stdio 双模式）子 Agent 5dedc809
+- ⚠️ **推送暂缓**：GitHub SSH over 443 瞬时不可达（后台重试中，本地 8 个 commit 待推：c22f3c8→8e93a0b）
 
 ## 项目定义
 
