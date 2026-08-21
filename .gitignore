@@ -18,5 +18,9 @@ Thumbs.db
 memory/*.db
 memory/**/*.db
 
+# memory/ 作为独立 git 仓库（阶段 4 git-init），防主仓库误跟踪为 gitlink
+memory/.git/
+memory/.gitignore
+
 # 记忆库索引（derived state，可随时 rebuild；放 memory/ 同级，不入 git）
 .zipper-agent-memory.index.sqlite*

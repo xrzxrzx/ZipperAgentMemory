@@ -9,7 +9,7 @@
 
 - 记忆以 **Markdown + CSV/Markdown 表格** 文件、多目录结构持久化在服务器磁盘上；
 - 服务器上运行一个 **常驻守护进程** 维护记忆（监听变更、建索引、提供访问接口）；
-- Agent 通过 **MCP（stdio）** 访问记忆库，skill 作为无 MCP 场景的补充；
+- Agent 通过 **MCP（serve 常驻 HTTP + stdio 双模式）** 访问记忆库，skill 作为无 MCP 场景的补充；
 - 记忆迁移支持 **目录整体复制/打包** 与 **git 仓库同步** 两种模式；
 - 服务器性能较低，**资源占用是硬约束**。
 
@@ -84,7 +84,7 @@
 
 - **单一进程**：watcher、索引、MCP server 合体，避免多进程内存叠加；
 - **进程只做编排**：读写本质是文件操作，进程崩溃不丢数据（文件即真源）；
-- **索引可重建**：`memory/` 目录丢失索引文件无碍，进程可用 `--rebuild-index` 全量重建。
+- **索引可重建**：`memory/` 目录丢失索引文件无碍，进程可用 `rebuild-index` 子命令全量重建。
 
 ### 4.1 MCP 传输形态（已确认：方案 A）
 
@@ -126,7 +126,7 @@ memory/                      ← 整个目录即 git 仓库
 **文件约定**：
 
 - 所有记忆文件正文用 Markdown；结构化数据用 CSV 或 Markdown 表格，二者择一，**同库内不混用同一主题的两种格式**；
-- 文件首行（CSV 为表头）作为内容摘要来源；
+- 文件首行（CSV 为表头）作为内容摘要来源（检索片段由 FTS snippet 承担，功能等价）；
 - 文件名即浅层检索键：蛇形命名，禁止空格与中文文件名（内容可以中文）；
 - 每个文件前几行可含 YAML front-matter（`tags`、`created`、`source`），供 FTS 与索引使用。
 
@@ -150,7 +150,7 @@ memory/                      ← 整个目录即 git 仓库
 
 - **路径沙箱**：所有 `path` 参数解析后必须落在 memory/ 根内，防穿越；
 - **并发写**：进程内互斥锁串行化写操作；文件写入采用「临时文件 + rename」原子替换；
-- **写链路稳定性是硬要求**（教训源自 basic-memory：move 孤儿 #1152、观察重复/死锁 #1214/#1213 均出在写入链路）：写操作必须原子、可恢复，禁止出现「文件写了但索引没更新/索引更新但文件没写」的半态；任何中途失败只能留下「可被 `--rebuild-index` 修复」的状态，且写入顺序固定为：临时文件 → rename → 索引；
+- **写链路稳定性是硬要求**（教训源自 basic-memory：move 孤儿 #1152、观察重复/死锁 #1214/#1213 均出在写入链路）：写操作必须原子、可恢复，禁止出现「文件写了但索引没更新/索引更新但文件没写」的半态；任何中途失败只能留下「可被 `rebuild-index` 修复」的状态，且写入顺序固定为：临时文件 → rename → 索引；
 - **读不受锁影响**：只读文件，不阻塞。
 
 ### 6.3 事件与通知（v1 可选）
@@ -159,7 +159,7 @@ memory/                      ← 整个目录即 git 仓库
 
 ## 7. 迁移方案（双模式）
 
-1. **目录复制**：直接 `cp -r memory/` 或打包 `zip/tar`，目标机解压后 `zipper-agent-memoryd --rebuild-index` 即可使用；
+1. **目录复制**：直接 `cp -r memory/` 或打包 `zip/tar`，目标机解压后 `zipper-agent-memoryd rebuild-index` 即可使用；
 2. **git 同步**：
    - 有远程：`git clone` / `push` / `pull`；
    - 无远程：`git bundle create memory.bundle --all` 产出**单文件**，目标机 `git clone memory.bundle`；
@@ -178,8 +178,8 @@ memory/                      ← 整个目录即 git 仓库
 - 验收：CLI 子命令 `zam write/read/append` 可对 memory/ 正确读写；路径穿越被拒绝
 
 ### 阶段 2：守护进程（watcher + 索引）
-- 交付：`fsnotify` 监听（去抖合并）、SQLite FTS5 索引、`--rebuild-index`、`--serve`
-- 验收：修改文件后 ≤2s 索引可见新内容；搜索命中正确；删除文件索引同步移除；`--rebuild-index` 后结果一致；常驻内存 < 60MB（`/usr/bin/time -v` 验证）
+- 交付：`fsnotify` 监听（去抖合并）、SQLite FTS5 索引、`rebuild-index`、`serve`
+- 验收：修改文件后 ≤2s 索引可见新内容；搜索命中正确；删除文件索引同步移除；`rebuild-index` 后结果一致；常驻内存 < 60MB（`/usr/bin/time -v` 验证）
 
 ### 阶段 3：MCP server（serve HTTP + stdio 双模式）
 - 交付：实现 §6 全部 6 个 tools（带行为标注）；官方 go-sdk v1.7.x；`serve` 挂载 `/mcp`（默认 `127.0.0.1:8931`，streamable HTTP，JSONResponse 便于调试）+ `stdio` 按需模式；写后同步索引
@@ -203,7 +203,7 @@ memory/                      ← 整个目录即 git 仓库
 | R4 | git 仓库随记忆增长膨胀 | autocommit 默认关闭；定期 `git gc` 提示写入手册 |
 | R5 | CSV 与 Markdown 表格混用 | schema 约定同一主题二选一；`memory_status` 可预警 |
 | R6 | **basic-memory 为 AGPL-3.0**：只可借鉴设计思想，严禁复制其代码 | 独立实现，代码全部原创；调研报告只做设计参考，不摘录代码 |
-| R7 | 索引与文件短暂不一致 | 索引=derived state（eventually consistent），文件=canonical state；不做加锁强一致，可随时 `--rebuild-index` |
+| R7 | 索引与文件短暂不一致 | 索引=derived state（eventually consistent），文件=canonical state；不做加锁强一致，可随时 `rebuild-index` |
 
 ## 10. 已确认决策（用户拍板 2026-08-21）
 
