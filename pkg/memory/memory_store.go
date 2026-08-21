@@ -154,6 +154,10 @@ func resolvePathDepth(p string, depth int) (string, error) {
 	return cur, nil
 }
 
+// Root 返回记忆库根目录的绝对路径（filepath.Clean 后）。
+// 供阶段 2 索引全量重建（pkg/index.Rebuild 遍历目录树）等外部遍历使用。
+func (s *Store) Root() string { return s.root }
+
 // Read 读取根内相对路径 rel 的文件内容。读操作不加锁（设计文档 §6.2）。
 func (s *Store) Read(rel string) ([]byte, error) {
 	p, err := s.resolve(rel)
