@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -393,5 +394,89 @@ func TestUnknownTool(t *testing.T) {
 	_, err := sess.CallTool(context.Background(), &sdk.CallToolParams{Name: "no_such_tool"})
 	if err == nil {
 		t.Fatal("未知工具应返回错误")
+	}
+}
+
+// TestDecodeArgsInvalidJSON 参数解析边界：非 JSON / 语法错误 / 类型错误的
+// 参数载荷一律报错（decodeArgs 是全部工具参数校验的公共入口）。
+func TestDecodeArgsInvalidJSON(t *testing.T) {
+	var out struct{ Path string }
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`not json`),
+		json.RawMessage(`{"path": }`),
+		json.RawMessage(`[1,2,3]`),  // 数组而非对象
+		json.RawMessage(`"string"`), // 字符串而非对象
+	} {
+		if err := decodeArgs("t", raw, &out); err == nil {
+			t.Errorf("decodeArgs(%q) 应报错", raw)
+		}
+	}
+	if err := decodeArgs("t", json.RawMessage(`{"path":"a.md"}`), &out); err != nil {
+		t.Fatalf("decodeArgs(valid) = %v", err)
+	}
+	if out.Path != "a.md" {
+		t.Errorf("Path = %q, want a.md", out.Path)
+	}
+	// 空/缺失参数按 {} 处理（不报错，缺参语义由各 handler 判断）。
+	if err := decodeArgs("t", nil, &out); err != nil {
+		t.Errorf("decodeArgs(nil) = %v", err)
+	}
+}
+
+// TestToolArgumentTypeValidation 参数校验：错误类型的参数值（number/array/
+// boolean 代替 string）返回 IsError 工具错误，而不是协议崩溃。
+func TestToolArgumentTypeValidation(t *testing.T) {
+	_, sess, _ := newTestServer(t)
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"memory_read", map[string]any{"path": 123}},
+		{"memory_write", map[string]any{"path": "notes/x.md", "content": 456}},
+		{"memory_append", map[string]any{"path": 789, "content": "x"}},
+		{"memory_search", map[string]any{"query": []string{"x"}}},
+		{"memory_list", map[string]any{"path": true}},
+	}
+	for _, c := range cases {
+		res := callTool(t, sess, c.name, c.args)
+		if !res.IsError {
+			t.Errorf("%s 错误类型参数应返回 IsError 工具错误，实际 %q", c.name, textOf(res))
+		}
+	}
+}
+
+// TestSearchNegativeLimitDefaults 边界：search limit<=0 按默认 20 处理
+// （不报错、不 panic），与 pkg/index.Search 语义一致。
+func TestSearchNegativeLimitDefaults(t *testing.T) {
+	s, sess, _ := newTestServer(t)
+	if err := s.store.Write("notes/boundary.md", []byte("边界测试 boundary keyword"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ix.Rebuild(s.store); err != nil {
+		t.Fatal(err)
+	}
+	res := callTool(t, sess, "memory_search", map[string]any{"query": "boundary", "limit": -1})
+	if res.IsError {
+		t.Fatalf("limit=-1 应正常返回，实际 %q", textOf(res))
+	}
+	if !strings.HasPrefix(textOf(res), "1 hit(s)") {
+		t.Errorf("limit=-1 应命中 1 条，实际 %q", textOf(res))
+	}
+}
+
+// TestListDefaultPath 边界：memory_list 缺省 path 与 "." 等价（列根目录），
+// 与工具 schema 默认值一致。
+func TestListDefaultPath(t *testing.T) {
+	s, sess, _ := newTestServer(t)
+	if err := s.store.Write("rootfile.md", []byte("x"), false); err != nil {
+		t.Fatal(err)
+	}
+	res := callTool(t, sess, "memory_list", map[string]any{})
+	if res.IsError || !strings.Contains(textOf(res), "rootfile.md") {
+		t.Errorf("缺省 path 应列根目录，实际 %q", textOf(res))
+	}
+	res = callTool(t, sess, "memory_list", map[string]any{"path": "."})
+	if res.IsError || !strings.Contains(textOf(res), "rootfile.md") {
+		t.Errorf("path=. 应列根目录，实际 %q", textOf(res))
 	}
 }

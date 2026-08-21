@@ -275,3 +275,138 @@ func TestUpsertMetaPersisted(t *testing.T) {
 		t.Errorf("docs row = (%d, %d, %q), want (%d, 123, go)", mtime, size, tags, when.Unix())
 	}
 }
+
+// TestShouldIndexBoundaries 覆盖 ShouldIndex 判定边界（Rebuild 遍历与
+// watcher 增量共用）：根目录本身、隐藏文件/目录、.tmp-* 原子写遗留、
+// 扩展名大小写、非文本扩展名、正斜杠/本机分隔符混合输入。
+func TestShouldIndexBoundaries(t *testing.T) {
+	tests := []struct {
+		name  string
+		rel   string
+		isDir bool
+		want  bool
+	}{
+		{"根目录本身不索引", ".", false, false},
+		{"空路径不索引", "", false, false},
+		{"普通 md 文件", "notes/a.md", false, true},
+		{"大写扩展名同样可索引", "notes/A.MD", false, true},
+		{"csv 可索引", "structured/tasks.csv", false, true},
+		{"tsv 可索引", "structured/t.tsv", false, true},
+		{"txt 可索引", "notes/raw.txt", false, true},
+		{"json 可索引", "meta/config.json", false, true},
+		{"yaml 可索引", "meta/c.yaml", false, true},
+		{"toml 可索引", "meta/c.toml", false, true},
+		{"二进制不进索引", "notes/photo.png", false, false},
+		{"无扩展名不进索引", "notes/README", false, false},
+		{"隐藏文件不进索引", "notes/.hidden.md", false, false},
+		{"原子写临时文件不进索引", "notes/.tmp-12345", false, false},
+		{"隐藏目录返回可索引(供剪枝判断)", ".git", true, false},
+		{"普通目录返回可索引(供遍历下钻)", "notes/sub", true, true},
+		{"隐藏深层目录剪枝", "notes/.cache", true, false},
+		{"Windows 分隔符输入", `notes\sub\a.md`, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShouldIndex(tt.rel, tt.isDir); got != tt.want {
+				t.Errorf("ShouldIndex(%q, isDir=%v) = %v, want %v", tt.rel, tt.isDir, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRebuildEmptyDir 边界：空记忆库重建返回 0 且无错误，搜索空结果。
+func TestRebuildEmptyDir(t *testing.T) {
+	store, err := memory.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix := openTestIndex(t)
+	n, err := ix.Rebuild(store)
+	if err != nil {
+		t.Fatalf("Rebuild(empty): %v", err)
+	}
+	if n != 0 {
+		t.Errorf("Rebuild(empty) = %d files, want 0", n)
+	}
+	if paths := searchPaths(t, ix, "anything"); len(paths) != 0 {
+		t.Errorf("empty rebuild should have no hits, got %v", paths)
+	}
+}
+
+// TestRebuildPrunesHiddenDir 边界：隐藏目录（.git 等）整体不进索引，
+// 其内即使有可索引扩展名文件也不进入（collectIndexableFiles 剪枝）。
+func TestRebuildPrunesHiddenDir(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"notes/visible.md":     "可见内容 visible",
+		".git/hooks/sample.md": "git 内部 sample 不该进索引",
+		".hidden/inner.md":     "隐藏目录 inner 不该进索引",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := memory.OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix := openTestIndex(t)
+	n, err := ix.Rebuild(store)
+	if err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("Rebuild = %d files, want 1（隐藏目录内文件被剪枝）", n)
+	}
+	for _, q := range []string{"sample", "inner", "visible"} {
+		paths := searchPaths(t, ix, q)
+		if q == "visible" && !contains(paths, "notes/visible.md") {
+			t.Errorf("Search(%q) 应命中 visible.md，实际 %v", q, paths)
+		}
+		if q != "visible" && len(paths) != 0 {
+			t.Errorf("Search(%q) 应无命中（隐藏目录剪枝），实际 %v", q, paths)
+		}
+	}
+}
+
+// TestRebuildIdempotent 边界：重复重建结果一致（幂等），且重建后可再次
+// 增量 Upsert/Remove（重建未破坏表的可用性）。
+func TestRebuildIdempotent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes", "a.md"), []byte("苹果 apple"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := memory.OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix := openTestIndex(t)
+	if _, err := ix.Rebuild(store); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.Rebuild(store); err != nil {
+		t.Fatalf("second Rebuild: %v", err)
+	}
+	if paths := searchPaths(t, ix, "苹果"); !contains(paths, "notes/a.md") {
+		t.Errorf("重复重建后仍应命中，实际 %v", paths)
+	}
+	// 重建后增量能力未损坏。
+	mustUpsert(t, ix, "notes/b.md", "香蕉 banana")
+	if paths := searchPaths(t, ix, "banana"); !contains(paths, "notes/b.md") {
+		t.Errorf("重建后 Upsert 未生效：%v", paths)
+	}
+	if err := ix.Remove("notes/a.md"); err != nil {
+		t.Fatalf("重建后 Remove: %v", err)
+	}
+	if paths := searchPaths(t, ix, "苹果"); len(paths) != 0 {
+		t.Errorf("重建后 Remove 未生效：%v", paths)
+	}
+}
