@@ -93,7 +93,9 @@ func (w *Watcher) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("watch: new fsnotify watcher: %w", err)
 	}
+	w.mu.Lock()
 	w.fw = fw
+	w.mu.Unlock()
 	defer fw.Close()
 
 	// 初始遍历：为 root 下现存全部目录挂监听（含深层子目录）。
@@ -173,11 +175,23 @@ func (w *Watcher) release() {
 
 // Close 提前关闭底层 fsnotify 资源。Start 返回时已自动释放，本方法幂等；
 // 通常在测试或不再需要监听时调用。
+//
+// 并发注意：fw 由 Start 创建并赋值、Close 关闭，二者本应串行使用
+// （Start 阻塞运行期间调用 Close 属误用）；为防御误用，Close 与 Start
+// 之间经 closed 通道协调——release() 关闭 closed 后，Start 的 select
+// 会退出并执行 defer fw.Close()，避免对已关闭 watcher 的双重操作。
 func (w *Watcher) Close() {
-	if w == nil || w.fw == nil {
+	if w == nil {
 		return
 	}
-	_ = w.fw.Close()
+	// 仅当 Start 已创建 fw 且尚未释放时才主动关闭；否则交给
+	// Start 的 defer（其 select 会在 closed 关闭后退出）。
+	w.mu.Lock()
+	started := w.fw != nil
+	w.mu.Unlock()
+	if started {
+		_ = w.fw.Close()
+	}
 	w.release()
 }
 
