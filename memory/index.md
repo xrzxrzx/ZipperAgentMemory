@@ -10,4 +10,4 @@
 
 ## 最近更新
 
-- （由守护进程自动维护，阶段 2 起生效）
+- （当前为静态占位；最近变更可通过 `zipper-agent-memoryd search` 或 MCP `memory_search` 查询）
