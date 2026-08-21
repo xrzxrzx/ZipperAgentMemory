@@ -1,0 +1,19 @@
+# 调研缓存（子 Agent 工作目录，不入库）
+.research-cache/
+
+# 构建产物
+bin/
+dist/
+*.exe
+
+# 本地环境
+.env
+.env.local
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 记忆库数据（如有本地样例）
+memory/*.db
+memory/**/*.db
