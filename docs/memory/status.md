@@ -3,18 +3,19 @@
 > 更新规则：每次阶段结束/重要决策后更新本文件，保持为「当前事实」，不保留历史（历史见 git）。
 
 - 更新日期：2026-08-22
-- 当前阶段：**阶段 4 派发准备** —— 阶段 3 验收通过（7/7），git 集成与迁移即将开始
+- 当前阶段：**阶段 5 派发准备** —— 阶段 4 验收通过（7/7），测试/文档/部署交付即将开始
 
 ## 里程碑
 
 - ✅ **设计批准**（2026-08-21 全批准）：MCP 方案 A、autocommit 默认关、设计 v1.0
 - ✅ **本地 Go 升级**：1.24.5 → 1.26.7
-- ✅ **阶段 0**：Go 骨架（docs/验收/阶段0.md）
-- ✅ **阶段 1**：pkg/memory + zam CLI；修复 Windows junction 逃逸（docs/验收/阶段1.md）
-- ✅ **阶段 2**：pkg/index（FTS5/WAL/CJK）+ pkg/watch；内存 11.84MB、CPU 0 秒（docs/验收/阶段2.md）
-- ✅ **阶段 3**：MCP server 双模式——官方 go-sdk v1.7.0、6 tools 带行为标注、serve HTTP（127.0.0.1:8931）+ stdio、e2e 集成测试（docs/验收/阶段3.md）
-- ⏳ **阶段 4 即将派发**：git 集成（autocommit 默认关）+ 迁移脚本
-- ✅ 远端同步：HEAD = fe6bf94
+- ✅ **阶段 0**：Go 骨架
+- ✅ **阶段 1**：pkg/memory + zam CLI；修复 Windows junction 逃逸
+- ✅ **阶段 2**：pkg/index + pkg/watch；内存 11.84MB、CPU 0 秒
+- ✅ **阶段 3**：MCP server 双模式（官方 go-sdk v1.7.0，127.0.0.1:8931）
+- ✅ **阶段 4**：pkg/git AutoCommitter（默认关）+ git-init + scripts/migrate.sh（pack/bundle/restore）；7/7 验收（docs/验收/阶段4.md），提交 acab8ac→e3c7bd7
+- ⏳ **阶段 5 即将派发**：测试补全、代码审查、README、服务器部署（8.141.89.50）
+- ✅ 远端同步：HEAD = e3c7bd7
 
 ## 项目定义
 
