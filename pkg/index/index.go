@@ -36,8 +36,10 @@ type Result struct {
 
 // Index 是记忆库的 SQLite FTS5 索引。
 //
-// 并发模型：所有读写经 ix.mu 串行化；数据库连接池固定单连接
-// （db.SetMaxOpenConns(1)），写事务天然串行，无 SQLITE_BUSY 竞争。
+// 并发模型：写操作（Upsert/Remove/Rebuild）经 ix.mu 串行化；
+// 读操作（Search/Close）依赖数据库连接池固定单连接
+// （db.SetMaxOpenConns(1)）保证 SQLite 层天然串行，无 SQLITE_BUSY 竞争，
+// 不额外取 ix.mu（与写操作共享同一连接池，SQLite 内部排队）。
 // 索引是 derived state，方法不假设调用方持有任何文件锁。
 type Index struct {
 	db *sql.DB
