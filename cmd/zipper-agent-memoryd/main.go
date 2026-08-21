@@ -1,24 +1,28 @@
 // 命令 zipper-agent-memoryd 是 ZipperAgentMemory 的记忆守护进程入口。
 //
-// 子命令（阶段 2/3）：
+// 子命令（阶段 2/3/4）：
 //
 //	serve          常驻运行：启动时全量重建索引，随后 fsnotify 监听 memory/
 //	                （去抖合并）增量维护索引，并同时提供 MCP streamable HTTP
-//	                服务（默认 http://127.0.0.1:8931/mcp）；SIGINT/SIGTERM
-//	                优雅退出。
+//	                服务（默认 http://127.0.0.1:8931/mcp）；可选 -git-autocommit
+//	                在变更去抖批次后自动 git add -A && commit（默认关闭）；
+//	                SIGINT/SIGTERM 优雅退出。
 //	stdio          MCP stdio 模式（按需拉起，供纯 stdio 客户端）：启动时
 //	                全量重建索引后以 stdin/stdout 提供 MCP 服务，客户端断开
 //	                即退出。
 //	rebuild-index  全量重建索引后退出（索引是 derived state，可随时重建）。
+//	git-init       初始化 memory/ 为 git 仓库并补全本地 user.name/email
+//	                （幂等，不碰全局配置；供迁移 bundle 等场景使用）。
 //	search QUERY   全文检索并输出 路径+命中片段（供人工/测试）。
 //	version        输出版本号。
 //
 // 用法示例：
 //
 //	zipper-agent-memoryd serve -root memory
-//	zipper-agent-memoryd serve -root memory -addr 127.0.0.1:8931
+//	zipper-agent-memoryd serve -root memory -addr 127.0.0.1:8931 -git-autocommit
 //	zipper-agent-memoryd stdio -root memory
 //	zipper-agent-memoryd rebuild-index -root memory
+//	zipper-agent-memoryd git-init -root memory
 //	zipper-agent-memoryd search -root memory "Go 语言"
 //
 // 索引数据库默认放在 memory/ 根目录的同级（不进入被监听的目录树，避免
@@ -36,8 +40,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"zipper-agent-memory/pkg/git"
 	"zipper-agent-memory/pkg/index"
 	"zipper-agent-memory/pkg/mcp"
 	"zipper-agent-memory/pkg/memory"
@@ -45,7 +51,7 @@ import (
 )
 
 // version 是守护进程版本号，对应 docs/design.md 的阶段交付规划。
-const version = "v0.3.0"
+const version = "v0.4.0"
 
 // logger 统一向 stderr 输出运行日志（stdout 留给 search 等命令式输出，
 // 且阶段 3 的 stdio 模式需要 stdout 归 MCP 协议使用）。
@@ -65,6 +71,8 @@ func main() {
 		err = cmdStdio(rest)
 	case "rebuild-index":
 		err = cmdRebuildIndex(rest)
+	case "git-init":
+		err = cmdGitInit(rest)
 	case "search":
 		err = cmdSearch(rest)
 	case "version", "-version", "--version":
@@ -164,11 +172,12 @@ func cmdServe(args []string) error {
 	fs, root, db := newFlagSet("serve")
 	debounce := fs.Duration("debounce", 500*time.Millisecond, "文件事件去抖窗口（滑动窗口，事件静默该时长后批量入库）")
 	addr := fs.String("addr", "127.0.0.1:8931", "MCP streamable HTTP 监听地址（host:port）")
+	gitAuto := fs.Bool("git-autocommit", false, "启用 git autocommit：变更去抖批次后自动对 memory/ 仓库 git add -A && commit（默认关闭；仓库未初始化时自动 git init 并设置本地 user.name/email，不碰全局配置）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: zipper-agent-memoryd serve [-root dir] [-db path] [-debounce duration] [-addr host:port]")
+		return fmt.Errorf("usage: zipper-agent-memoryd serve [-root dir] [-db path] [-debounce duration] [-addr host:port] [-git-autocommit]")
 	}
 
 	store, ix, rootAbs, err := openStoreIndex(*root, *db)
@@ -178,6 +187,20 @@ func cmdServe(args []string) error {
 	defer ix.Close()
 	dbPath := resolveDBPath(rootAbs, *db)
 
+	// 可选 git autocommit（默认关闭，显式 -git-autocommit 开启）。
+	var ac *git.AutoCommitter
+	if *gitAuto {
+		ac, err = git.NewAutoCommitter(git.Options{
+			Root:    rootAbs,
+			Enabled: true,
+			Logf:    logger.Printf,
+		})
+		if err != nil {
+			return fmt.Errorf("git autocommit: %w", err)
+		}
+		logger.Printf("git autocommit enabled (repo=%s)", rootAbs)
+	}
+
 	// 启动时全量重建：索引与磁盘一致后再开始增量监听（derived state 的
 	// 一致点；后续不一致都可随时 rebuild 恢复）。
 	n, err := ix.Rebuild(store)
@@ -186,7 +209,22 @@ func cmdServe(args []string) error {
 	}
 	logger.Printf("index ready: %d files (db=%s)", n, dbPath)
 
-	w, err := watch.New(rootAbs, eventToIndex(ix, rootAbs), watch.Options{
+	// watcher 去抖批次 Handler：索引更新后，若启用 autocommit 且批次含
+	// .git 之外的变更，同步提交（与索引同一 goroutine，天然串行）。
+	handler := eventToIndex(ix, rootAbs)
+	if ac != nil {
+		inner := handler
+		handler = func(evs []watch.Event) {
+			inner(evs)
+			if hasNonGitEvent(rootAbs, evs) {
+				if err := ac.Commit(); err != nil {
+					logger.Printf("git autocommit: %v", err)
+				}
+			}
+		}
+	}
+
+	w, err := watch.New(rootAbs, handler, watch.Options{
 		Debounce: *debounce,
 		OnError:  func(err error) { logger.Printf("watch: %v", err) },
 	})
@@ -264,6 +302,22 @@ func cmdStdio(args []string) error {
 	return mcpSrv.RunStdio(ctx)
 }
 
+// hasNonGitEvent 报告批次中是否存在 memory/.git 之外的变更事件。
+// git 自身写 .git 会触发 fsnotify 事件，若不滤除将形成
+// 「提交 → 事件 → 提交」反馈环；git add -A 以整棵树为对象，
+// 无需按事件定位变更，故 .git 内部批次可直接跳过。
+func hasNonGitEvent(rootAbs string, evs []watch.Event) bool {
+	gitDir := filepath.Join(rootAbs, ".git")
+	for _, e := range evs {
+		rel, err := filepath.Rel(gitDir, e.Path)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue // 事件位于 .git 内
+		}
+		return true
+	}
+	return false
+}
+
 func cmdRebuildIndex(args []string) error {
 	fs, root, db := newFlagSet("rebuild-index")
 	if err := fs.Parse(args); err != nil {
@@ -290,6 +344,29 @@ func cmdRebuildIndex(args []string) error {
 		return err
 	}
 	fmt.Printf("rebuild-index: %d files indexed\n", n)
+	return nil
+}
+
+// cmdGitInit 初始化 memory/ 为 git 仓库并补全本地 user.name/email（幂等）。
+// 全程只写仓库本地 config（git config --local），不碰全局配置。
+func cmdGitInit(args []string) error {
+	fs, root, _ := newFlagSet("git-init")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: zipper-agent-memoryd git-init [-root dir]")
+	}
+	rootAbs, err := filepath.Abs(*root)
+	if err != nil {
+		return err
+	}
+	rootAbs = filepath.Clean(rootAbs)
+	if err := git.EnsureRepo(rootAbs); err != nil {
+		return err
+	}
+	logger.Printf("git repository ready at %s (local user.name=%s, user.email=%s)", rootAbs, git.DefaultUserName, git.DefaultUserEmail)
+	fmt.Printf("git-init: repository ready at %s\n", rootAbs)
 	return nil
 }
 
@@ -323,7 +400,7 @@ func cmdSearch(args []string) error {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `zipper-agent-memoryd - ZipperAgentMemory 记忆守护进程（阶段 2/3）
+	fmt.Fprintf(os.Stderr, `zipper-agent-memoryd - ZipperAgentMemory 记忆守护进程（阶段 2/3/4）
 
 用法：
   zipper-agent-memoryd <command> [flags] [args]
@@ -333,6 +410,7 @@ func usage() {
                 （默认 http://127.0.0.1:8931/mcp，Ctrl+C 退出）
   stdio          MCP stdio 模式：按需拉起，供纯 stdio 客户端（客户端断开即退出）
   rebuild-index  全量重建索引后退出
+  git-init       初始化 memory/ 为 git 仓库并补全本地 user.name/email（幂等）
   search         全文检索并输出 路径+命中片段
   version        输出版本号
 
@@ -343,12 +421,15 @@ func usage() {
 serve 专属 flag：
   -addr <host:port>   MCP 监听地址（默认 127.0.0.1:8931）
   -debounce <dur>     文件事件去抖窗口（默认 500ms）
+  -git-autocommit     启用 git autocommit：变更去抖批次后自动 git add -A && commit
+                      （默认关闭；仓库未初始化时自动 git init，不碰全局配置）
 
 示例：
   zipper-agent-memoryd serve -root memory
-  zipper-agent-memoryd serve -root memory -addr 127.0.0.1:8931
+  zipper-agent-memoryd serve -root memory -addr 127.0.0.1:8931 -git-autocommit
   zipper-agent-memoryd stdio -root memory
   zipper-agent-memoryd rebuild-index -root memory
+  zipper-agent-memoryd git-init -root memory
   zipper-agent-memoryd search -root memory "Go 语言"
 `)
 }

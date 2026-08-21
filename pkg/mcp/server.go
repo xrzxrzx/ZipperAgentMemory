@@ -14,7 +14,7 @@ import (
 
 // Version 是 MCP server 实现版本（SDK Implementation.Version 与进程版本号
 // cmd/zipper-agent-memoryd 保持同步）。
-const Version = "v0.3.0"
+const Version = "v0.4.0"
 
 // Server 是 ZipperAgentMemory 的 MCP 服务器：把 memory 库 6 个 memory_* 工具
 // 注册到官方 go-sdk，支持双传输（design.md §4.1 方案 A）：
