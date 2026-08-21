@@ -1,0 +1,7 @@
+{
+  "allow_ips": ["127.0.0.1", "120.228.126.4"],
+  "autocommit": {
+    "enabled": true,
+    "hour": 0
+  }
+}
