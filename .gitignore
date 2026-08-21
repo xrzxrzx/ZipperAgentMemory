@@ -20,8 +20,8 @@ memory/**/*.db
 
 # 【安全】记忆库整体不入项目仓库：内容含敏感数据（密码薄/服务器密码等），
 # 只存在于服务器本地，由 memory/ 独立 git 仓库管理（git-init），
-# 经迁移脚本（pack/bundle/restore）跨机复制。骨架模板见 docs/design.md §5。
-memory/
+# 经迁移脚本（pack/bundle/restore）跨机复制。骨架模板见 docs/memory-template/。
+/memory/
 
 # 记忆库索引（derived state，可随时 rebuild；放 memory/ 同级，不入 git）
 .zipper-agent-memory.index.sqlite*
