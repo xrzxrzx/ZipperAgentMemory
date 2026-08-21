@@ -11,13 +11,13 @@ AI 跨平台永久性记忆工具：Linux 低资源服务器上 Go 常驻进程�
 
 ## 基础设施（本轮新增）
 
-- GitHub 远程：`git@github.com:xrzxrzx/ZipperAgentMemory.git`（已建好，本地已 init + 首次 commit `85f3c7c`）
-  - ⚠️ 推送受阻：SSH key 被添加为仓库 Deploy Key（只读），需用户勾选 Allow write access 或改账号级 Authentication Key
-  - 网络：GitHub 22 端口被墙，已配置 SSH over 443（`~/.ssh/config` 追加 github.com → ssh.github.com:443）
+- GitHub 远程：`git@github.com:xrzxrzx/ZipperAgentMemory.git` —— **已推送 3 个 commit**（85f3c7c 初始文档 / acf43f0 调研固化 / ff99859 AGENTS.d 规范）
+  - SSH over 443 已配置（22 端口被墙）；Deploy Key 写权限已由用户修复 ✅
 - 部署服务器：`8.141.89.50`（SSH alias `minichat-server`，密钥认证可用，无需密码）
   - 环境：阿里云 Linux 8（al8），2 核 / 1870MB 内存 / 40G 磁盘（可用 32G）
-  - 已装：sqlite3；**未装：Go、git**（部署阶段再装）
+  - 已装：sqlite3；**未装：Go（需 ≥1.25，go-sdk 要求）、git**（部署阶段再装）
   - 用途（用户确认）：**部署到这台服务器**
+- 协作规范：`AGENTS.d/` 八文件已落盘（roles/workflow/git/coding/testing/docs/review/memory）
 
 ## 已确认决策（用户拍板）
 
