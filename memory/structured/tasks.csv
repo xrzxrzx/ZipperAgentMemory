@@ -1,0 +1,4 @@
+task,status,priority,due
+调研 MCP Go SDK,done,high,2026-08-15
+实现记忆库核心,in_progress,high,2026-08-25
+实现守护进程,pending,high,2026-09-05

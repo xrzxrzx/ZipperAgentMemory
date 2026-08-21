@@ -42,10 +42,11 @@
 
 ## 5. 文件与路径安全
 
-1. 所有用户/agent 提供的路径必须经沙箱校验：`filepath.Clean` 后判断是否落在根目录内，**禁止符号链接逃逸**（校验前 `filepath.EvalSymlinks`）；
-2. 路径穿越一律返回 `ErrPathOutsideRoot`，不静默裁剪；
-3. 禁止直接用用户输入拼 `exec.Command` 参数；调 git 等外部命令时必须参数数组传参（禁用 shell 字符串）；
-4. 文件读写用 `os.OpenFile` + 显式权限（0644/0755），不依赖 umask 猜测。
+1. 所有用户/agent 提供的路径必须经沙箱校验：`filepath.Clean` 后判断是否落在根目录内，**禁止符号链接逃逸**；
+2. 符号链接解析**必须用组件级 `Lstat + os.Readlink`**（加递归深度上限防链接环），**禁止只用 `filepath.EvalSymlinks`**——Windows 上 EvalSymlinks 不解析目录联接（junction），存在写穿根目录漏洞（阶段 1 实测发现并修复，见 docs/验收/阶段1.md §6.1）；组件级解析对符号链接与 junction 均有效，Linux 语义与 EvalSymlinks 一致；
+3. 路径穿越一律返回 `ErrPathOutsideRoot`，不静默裁剪；
+4. 禁止直接用用户输入拼 `exec.Command` 参数；调 git 等外部命令时必须参数数组传参（禁用 shell 字符串）；
+5. 文件读写用 `os.OpenFile` + 显式权限（0644/0755），不依赖 umask 猜测。
 
 ## 6. 原子写与索引一致性
 
