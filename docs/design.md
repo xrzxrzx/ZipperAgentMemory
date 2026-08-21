@@ -200,19 +200,21 @@ memory/                      ← 整个目录即 git 仓库
 | R1 | MCP Go SDK 选型 | **已解决**：官方 `modelcontextprotocol/go-sdk` v1.7.x（Tier 1）；mark3labs 为备选 |
 | R2 | 多 Agent 并发写同一文件 | 进程级互斥 + 原子写；文档约定 agent 只写自己目录 |
 | R3 | Agent 自动沉淀格式失控 | 仅通过 `memory_append` 写入 agent/ 目录，格式由工具强约束 |
-| R4 | git 仓库随记忆增长膨胀 | autocommit 默认关闭；定期 `git gc` 提示写入手册 |
+| R4 | git 仓库随记忆增长膨胀 | autocommit **每日 0 点一次**（默认开启，见决策 6）；定期 `git gc` 提示写入手册 |
 | R5 | CSV 与 Markdown 表格混用 | schema 约定同一主题二选一；`memory_status` 可预警 |
 | R6 | **basic-memory 为 AGPL-3.0**：只可借鉴设计思想，严禁复制其代码 | 独立实现，代码全部原创；调研报告只做设计参考，不摘录代码 |
 | R7 | 索引与文件短暂不一致 | 索引=derived state（eventually consistent），文件=canonical state；不做加锁强一致，可随时 `rebuild-index` |
 
-## 10. 已确认决策（用户拍板 2026-08-21）
+## 10. 已确认决策（用户拍板 2026-08-21 + 2026-08-22 补充）
 
 | # | 决策 | 结论 |
 |---|------|------|
 | 1 | ~~语言选型~~ | ✅ Go（D5） |
 | 2 | ~~项目名~~ | ✅ ZipperAgentMemory（D7） |
-| 3 | **git autocommit** | ✅ **默认关闭**，开关随时可开 |
+| 3 | ~~git autocommit 默认关闭~~ | ✅ **变更（2026-08-22）：autocommit 默认开启，每日 0 点自动提交一次；用户可主动触发提交（`git-commit` 子命令）** |
 | 4 | **MCP 传输形态** | ✅ **方案 A**：单常驻进程 + streamable HTTP；二进制保留 `stdio` 模式（§4.1） |
-| 5 | **设计整体批准** | ✅ v1.0 生效，开工 |
+| 5 | ~~设计整体批准~~ | ✅ v1.0 生效 |
+| 6 | **公网部署（2026-08-22）** | ✅ 8931 端口对公网开放（用户已在云安全组放行），**IP 白名单访问控制**（部署时配置） |
+| 7 | **首次数据导入（2026-08-22）** | ✅ 密码薄.xlsx（忽略图片）转 CSV 存 `structured/`；服务器地址/root 密码/数据库密码记入记忆库 |
 
-> 本设计文档 v1.0 经用户全批准。后续任何偏离须先更新本文档并重新获批（AGENTS.d/workflow.md）。
+> 本设计文档 v1.0 经用户全批准；2026-08-22 补充决策 3/6/7 已获用户确认。后续任何偏离须先更新本文档并重新获批（AGENTS.d/workflow.md）。
