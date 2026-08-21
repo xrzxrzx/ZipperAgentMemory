@@ -14,7 +14,7 @@
 - ✅ **阶段 2 完成**：pkg/index（FTS5/WAL/CJK）+ pkg/watch（fsnotify 去抖）+ memoryd serve/rebuild/search；**内存 11.84MB、空闲 CPU 0 秒**（docs/验收/阶段2.md）
   - 依赖：modernc.org/sqlite v1.57.0、fsnotify v1.10.1（设计 §3.2 已批准）
 - ⏳ **阶段 3 进行中**：MCP server（官方 go-sdk v1.7.x，6 tools，serve HTTP + stdio 双模式）子 Agent 5dedc809
-- ⚠️ **推送暂缓**：GitHub SSH over 443 瞬时不可达（后台重试中，本地 8 个 commit 待推：c22f3c8→8e93a0b）
+- ✅ **推送恢复**：GitHub 瞬时故障已恢复，阶段 2 全部 7 commits + 状态更新已同步（HEAD = e9df40f）
 
 ## 项目定义
 
