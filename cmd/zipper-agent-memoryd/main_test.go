@@ -29,6 +29,12 @@ func TestServeFlagsAutocommitDefaultTrue(t *testing.T) {
 	if sf.addr != "127.0.0.1:8931" {
 		t.Fatalf("-addr 默认应保持 127.0.0.1:8931，实际 %q", sf.addr)
 	}
+	if sf.config != "" {
+		t.Fatalf("-config 默认应为空，实际 %q", sf.config)
+	}
+	if sf.gitAutoHour != 0 {
+		t.Fatalf("-git-autocommit-hour 默认应为 0，实际 %d", sf.gitAutoHour)
+	}
 }
 
 // TestNewServeAutoCommitterWiring 验收：装配逻辑——开启时构造 AutoCommitter

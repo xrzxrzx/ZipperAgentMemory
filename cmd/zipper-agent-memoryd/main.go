@@ -5,9 +5,11 @@
 //	serve          常驻运行：启动时全量重建索引，随后 fsnotify 监听 memory/
 //	                （去抖合并）增量维护索引，并同时提供 MCP streamable HTTP
 //	                服务（默认 http://127.0.0.1:8931/mcp）；git autocommit
-//	                默认开启——独立 goroutine 每日 0 点定时 git add -A &&
-//	                commit 一次（design 决策 3）；-allow-ips 可配置公网部署的
-//	                IP 白名单（决策 6）；SIGINT/SIGTERM 优雅退出。
+//	                默认开启——独立 goroutine 每日定时 git add -A && commit
+//	                一次（默认 0 点，design 决策 3）；-allow-ips 可配置公网
+//	                部署的 IP 白名单（决策 6）；-config 可选 JSON 配置文件
+//	                （autocommit.enabled/hour 与 allow_ips，flag 显式优先）；
+//	                SIGINT/SIGTERM 优雅退出。
 //	git-commit     立即执行一次 git 提交（用户主动触发入口，决策 3；
 //	                无变更时输出跳过）。
 //	stdio          MCP stdio 模式（按需拉起，供纯 stdio 客户端）：启动时
@@ -23,6 +25,7 @@
 //
 //	zipper-agent-memoryd serve -root memory
 //	zipper-agent-memoryd serve -root memory -addr 0.0.0.0:8931 -allow-ips "1.2.3.4,5.6.7.8"
+//	zipper-agent-memoryd serve -root memory -config /opt/zipper-agent-memory/config.json
 //	zipper-agent-memoryd serve -root memory -git-autocommit=false
 //	zipper-agent-memoryd git-commit -root memory
 //	zipper-agent-memoryd stdio -root memory
@@ -176,11 +179,15 @@ func eventToIndex(ix *index.Index, rootAbs string) func([]watch.Event) {
 }
 
 // serveFlags 承载 serve 子命令的专属 flag 值（root/db 由 newFlagSet 提供）。
+// 注意：gitAuto/gitAutoHour/allowIPs 的默认值仅作「flag 未显式给出」时的
+// 兜底；生效值由 loadServeConfig 按「flag 显式 > 配置文件 > 默认值」合并。
 type serveFlags struct {
-	debounce time.Duration
-	addr     string
-	gitAuto  bool
-	allowIPs string
+	debounce    time.Duration
+	addr        string
+	gitAuto     bool
+	gitAutoHour int
+	allowIPs    string
+	config      string
 }
 
 // registerServeFlags 注册 serve 专属 flag 并返回取值容器。独立成函数供测试
@@ -189,8 +196,10 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 	f := &serveFlags{}
 	fs.DurationVar(&f.debounce, "debounce", 500*time.Millisecond, "文件事件去抖窗口（滑动窗口，事件静默该时长后批量入库）")
 	fs.StringVar(&f.addr, "addr", "127.0.0.1:8931", "MCP streamable HTTP 监听地址（host:port）")
-	fs.BoolVar(&f.gitAuto, "git-autocommit", true, "git autocommit：每日 0 点定时对 memory/ 仓库 git add -A && commit 一次（默认开启，design 决策 3；可随时用 git-commit 子命令主动提交；仓库未初始化时自动 git init 并设置本地 user.name/email，不碰全局配置）")
-	fs.StringVar(&f.allowIPs, "allow-ips", "", "MCP HTTP 访问 IP 白名单（逗号分隔，如 1.2.3.4,5.6.7.8；空=不限制，design 决策 6）")
+	fs.BoolVar(&f.gitAuto, "git-autocommit", true, "git autocommit：每日定时对 memory/ 仓库 git add -A && commit 一次（默认开启，design 决策 3；可随时用 git-commit 子命令主动提交；仓库未初始化时自动 git init 并设置本地 user.name/email，不碰全局配置；显式给出时优先于 -config 配置文件的 autocommit.enabled）")
+	fs.IntVar(&f.gitAutoHour, "git-autocommit-hour", 0, "每日定时提交的小时 0-23（默认 0 点；显式给出时优先于 -config 配置文件的 autocommit.hour）")
+	fs.StringVar(&f.allowIPs, "allow-ips", "", "MCP HTTP 访问 IP 白名单（逗号分隔，如 1.2.3.4,5.6.7.8；空=不限制，design 决策 6；显式给出时优先于 -config 配置文件的 allow_ips）")
+	fs.StringVar(&f.config, "config", "", "JSON 配置文件路径（可选；含 autocommit.enabled/hour 与 allow_ips，flag 显式给出时优先；缺省字段用默认值）")
 	return f
 }
 
@@ -229,7 +238,7 @@ func cmdServe(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: zipper-agent-memoryd serve [-root dir] [-db path] [-debounce duration] [-addr host:port] [-git-autocommit[=bool]] [-allow-ips list]")
+		return fmt.Errorf("usage: zipper-agent-memoryd serve [-root dir] [-db path] [-debounce duration] [-addr host:port] [-git-autocommit[=bool]] [-git-autocommit-hour h] [-allow-ips list] [-config path]")
 	}
 
 	store, ix, rootAbs, err := openStoreIndex(*root, *db)
@@ -239,20 +248,29 @@ func cmdServe(args []string) error {
 	defer ix.Close()
 	dbPath := resolveDBPath(rootAbs, *db)
 
+	// 生效配置：flag 显式 > 配置文件（-config）> 默认值（design 决策 3/6）。
+	cfg, err := loadServeConfig(sf, fs)
+	if err != nil {
+		return err
+	}
+	if sf.config != "" {
+		logger.Printf("loaded config from %s", sf.config)
+	}
+
 	ctx, stop := signalContext()
 	defer stop()
 
-	// git autocommit：默认开启（决策 3），独立 goroutine 每日 0 点定时提交
-	// 一次；watcher 去抖批次内不再直接提交——定时提交以整棵树为对象
-	// （git add -A），幂等，与事件批次解耦（天然无反馈环）。
-	ac, err := newServeAutoCommitter(rootAbs, sf.gitAuto)
+	// git autocommit：默认开启（决策 3），独立 goroutine 每日 cfg.hour 点
+	// 定时提交一次；watcher 去抖批次内不再直接提交——定时提交以整棵树为
+	// 对象（git add -A），幂等，与事件批次解耦（天然无反馈环）。
+	ac, err := newServeAutoCommitter(rootAbs, cfg.gitAuto)
 	if err != nil {
 		return err
 	}
 	acErr := make(chan error, 1)
 	if ac != nil {
-		logger.Printf("git autocommit enabled: daily commit at 00:00 local (repo=%s)", rootAbs)
-		go func() { acErr <- ac.RunDaily(ctx, 0) }()
+		logger.Printf("git autocommit enabled: daily commit at %02d:00 local (repo=%s)", cfg.hour, rootAbs)
+		go func() { acErr <- ac.RunDaily(ctx, cfg.hour) }()
 	}
 
 	// 启动时全量重建：索引与磁盘一致后再开始增量监听（derived state 的
@@ -282,7 +300,7 @@ func cmdServe(args []string) error {
 
 	// IP 白名单（决策 6）：空 = 不限制（本地 127.0.0.1 模式无感知）；
 	// 非法条目在启动时快速失败，不留带病运行的半配置。
-	ips := parseIPList(sf.allowIPs)
+	ips := cfg.allowIPs
 	allowList, err := mcp.NewIPAllowList(ips)
 	if err != nil {
 		return err
@@ -504,15 +522,20 @@ func usage() {
 serve 专属 flag：
   -addr <host:port>   MCP 监听地址（默认 127.0.0.1:8931）
   -debounce <dur>     文件事件去抖窗口（默认 500ms）
-  -git-autocommit     git autocommit：每日 0 点定时 git add -A && commit 一次
+  -git-autocommit     git autocommit：每日定时 git add -A && commit 一次
                       （默认开启；可随时用 git-commit 主动提交；仓库未初始化
-                      时自动 git init，不碰全局配置）
+                      时自动 git init，不碰全局配置；显式给出时优先于配置）
+  -git-autocommit-hour <h>  每日定时提交小时 0-23（默认 0；显式给出时优先于配置）
   -allow-ips <list>   MCP HTTP 访问 IP 白名单（逗号分隔，如 1.2.3.4,5.6.7.8；
-                      空=不限制）
+                      空=不限制；显式给出时优先于配置）
+  -config <path>      JSON 配置文件（可选）：{"autocommit":{"enabled":true,
+                      "hour":0},"allow_ips":["127.0.0.1","120.228.126.4"]}；
+                      缺省字段用默认值，flag 显式给出时优先
 
 示例：
   zipper-agent-memoryd serve -root memory
   zipper-agent-memoryd serve -root memory -addr 0.0.0.0:8931 -allow-ips "1.2.3.4,5.6.7.8"
+  zipper-agent-memoryd serve -root memory -config /opt/zipper-agent-memory/config.json
   zipper-agent-memoryd serve -root memory -git-autocommit=false
   zipper-agent-memoryd git-commit -root memory
   zipper-agent-memoryd stdio -root memory
