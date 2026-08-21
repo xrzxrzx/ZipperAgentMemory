@@ -181,8 +181,8 @@ memory/                      ← 整个目录即 git 仓库
 - 交付：`fsnotify` 监听（去抖合并）、SQLite FTS5 索引、`--rebuild-index`、`--serve`
 - 验收：修改文件后 ≤2s 索引可见新内容；搜索命中正确；删除文件索引同步移除；`--rebuild-index` 后结果一致；常驻内存 < 60MB（`/usr/bin/time -v` 验证）
 
-### 阶段 3：MCP stdio server
-- 交付：实现 §6 全部 6 个 tools；MCP 握手与工具注册
+### 阶段 3：MCP server（serve HTTP + stdio 双模式）
+- 交付：实现 §6 全部 6 个 tools（带行为标注）；官方 go-sdk v1.7.x；`serve` 挂载 `/mcp`（默认 `127.0.0.1:8931`，streamable HTTP，JSONResponse 便于调试）+ `stdio` 按需模式；写后同步索引
 - 验收：用 MCP Inspector 或任意 MCP 客户端连接，6 个工具全部可用；路径穿越返回错误；并发写不丢数据
 
 ### 阶段 4：git 集成
