@@ -1,11 +1,14 @@
 package git
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // runGitOK 在测试中直接调用系统 git（参数数组；仅操作 t.TempDir() 本地仓库，
@@ -41,8 +44,12 @@ func TestAutoCommitterEnabledFullFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAutoCommitter: %v", err)
 	}
-	if err := ac.Commit(); err != nil {
+	committed, err := ac.Commit()
+	if err != nil {
 		t.Fatalf("first Commit: %v", err)
+	}
+	if !committed {
+		t.Fatal("first Commit 应实际提交")
 	}
 	if !IsRepo(dir) {
 		t.Fatal("repository was not auto-initialized")
@@ -59,7 +66,7 @@ func TestAutoCommitterEnabledFullFlow(t *testing.T) {
 
 	// 第二次变更 → 第二个提交。
 	writeFile(t, filepath.Join(dir, "notes", "b.md"), "# B\n")
-	if err := ac.Commit(); err != nil {
+	if _, err := ac.Commit(); err != nil {
 		t.Fatalf("second Commit: %v", err)
 	}
 	if got := strings.TrimSpace(runGitOK(t, dir, "rev-list", "--count", "HEAD")); got != "2" {
@@ -80,8 +87,12 @@ func TestAutoCommitterDisabledNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAutoCommitter: %v", err)
 	}
-	if err := ac.Commit(); err != nil {
+	committed, err := ac.Commit()
+	if err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+	if committed {
+		t.Fatal("disabled autocommit 不应返回 committed=true")
 	}
 	if IsRepo(dir) {
 		t.Fatal("disabled autocommit must not initialize the repository")
@@ -101,8 +112,12 @@ func TestAutoCommitterDisabledNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAutoCommitter: %v", err)
 	}
-	if err := ac2.Commit(); err != nil {
+	committed, err = ac2.Commit()
+	if err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+	if committed {
+		t.Fatal("disabled autocommit 不应返回 committed=true")
 	}
 	if got := strings.TrimSpace(runGitOK(t, dir2, "rev-list", "--count", "HEAD")); got != "1" {
 		t.Fatalf("disabled autocommit created commits: HEAD count = %s, want 1", got)
@@ -118,8 +133,12 @@ func TestAutoCommitterSkipsWhenNothingStaged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAutoCommitter: %v", err)
 	}
-	if err := ac.Commit(); err != nil {
+	committed, err := ac.Commit()
+	if err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+	if committed {
+		t.Fatal("空目录不应产生提交")
 	}
 	if !IsRepo(dir) {
 		t.Fatal("repo should be initialized")
@@ -135,11 +154,15 @@ func TestAutoCommitterSkipsWhenNothingStaged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAutoCommitter: %v", err)
 	}
-	if err := ac2.Commit(); err != nil {
+	if _, err := ac2.Commit(); err != nil {
 		t.Fatalf("baseline Commit: %v", err)
 	}
-	if err := ac2.Commit(); err != nil {
+	committed, err = ac2.Commit()
+	if err != nil {
 		t.Fatalf("no-change Commit: %v", err)
+	}
+	if committed {
+		t.Fatal("无变更不应返回 committed=true")
 	}
 	if got := strings.TrimSpace(runGitOK(t, dir2, "rev-list", "--count", "HEAD")); got != "1" {
 		t.Fatalf("no-change batch created a commit: HEAD count = %s, want 1", got)
@@ -191,5 +214,175 @@ func TestNewAutoCommitterValidation(t *testing.T) {
 	}
 	if _, err := NewAutoCommitter(Options{Root: f}); err == nil {
 		t.Fatal("file root must be rejected")
+	}
+}
+
+// TestNextDelay 验收 3：nextDelay 边界（0 点/跨天/恰在 hour 点/跨月/跨年）。
+// 语义与 cron "0 hour * * *" 一致：今日 hour 点已过（含恰在 hour:00:00）
+// 则顺延明日，否则指向今日。
+func TestNextDelay(t *testing.T) {
+	cases := []struct {
+		name string
+		now  time.Time
+		hour int
+		want time.Duration
+	}{
+		{"今日未到 0 点（10:30 → 明日 0 点）", time.Date(2026, 8, 22, 10, 30, 0, 0, time.UTC), 0, 13*time.Hour + 30*time.Minute},
+		{"今日已过 0 点（23:59:59 → 明日 0 点，1 秒后）", time.Date(2026, 8, 22, 23, 59, 59, 0, time.UTC), 0, time.Second},
+		{"恰在 0 点整（边界：视为已过 → 明日 0 点，24 小时）", time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC), 0, 24 * time.Hour},
+		{"0 点过 1ms → 明日 0 点", time.Date(2026, 8, 22, 0, 0, 0, 1_000_000, time.UTC), 0, 24*time.Hour - time.Millisecond},
+		{"恰在 hour 点（12:00 整 → 明日 12:00，24 小时）", time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC), 12, 24 * time.Hour},
+		{"hour 点前 1 秒（11:59:59 → 今日 12:00，1 秒后）", time.Date(2026, 8, 22, 11, 59, 59, 0, time.UTC), 12, time.Second},
+		{"跨月（8-31 23:00 → 9-1 0:00）", time.Date(2026, 8, 31, 23, 0, 0, 0, time.UTC), 0, time.Hour},
+		{"跨年（12-31 23:30 → 1-1 0:00）", time.Date(2026, 12, 31, 23, 30, 0, 0, time.UTC), 0, 30 * time.Minute},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nextDelay(tt.now, tt.hour); got != tt.want {
+				t.Errorf("nextDelay(%v, %d) = %v, want %v", tt.now, tt.hour, got, tt.want)
+			}
+		})
+	}
+	// 不变式：任意整点 hour 与任意时刻，等待时长恒为正（严格指向未来）。
+	for hour := 0; hour < 24; hour++ {
+		for _, now := range []time.Time{
+			time.Date(2026, 8, 22, hour, 0, 0, 0, time.UTC),
+			time.Date(2026, 8, 22, hour, 30, 0, 0, time.UTC),
+			time.Date(2026, 8, 22, 23, 59, 59, 0, time.UTC),
+		} {
+			if d := nextDelay(now, hour); d <= 0 {
+				t.Errorf("nextDelay(%v, %d) = %v, want > 0", now, hour, d)
+			}
+		}
+	}
+}
+
+// TestRunDailyDisabledNoOp 验收：Enabled=false 时 RunDaily 直接返回，
+// 不启动定时器、不产生任何 git 调用（Enabled 语义不变，决策 3）。
+func TestRunDailyDisabledNoOp(t *testing.T) {
+	rec := &recordingRunner{}
+	ac, err := NewAutoCommitter(Options{Root: t.TempDir(), Enabled: false, Runner: rec.run, Logf: t.Logf})
+	if err != nil {
+		t.Fatalf("NewAutoCommitter: %v", err)
+	}
+	start := time.Now()
+	if err := ac.RunDaily(context.Background(), 0); err != nil {
+		t.Fatalf("RunDaily: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("禁用状态 RunDaily 应立即返回，实际 %v", elapsed)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("禁用状态不应有任何 git 调用：%v", rec.calls)
+	}
+}
+
+// TestRunDailyInvalidHour 验收：hour 越界（<0 或 >23）返回错误。
+func TestRunDailyInvalidHour(t *testing.T) {
+	ac, err := NewAutoCommitter(Options{Root: t.TempDir(), Enabled: true})
+	if err != nil {
+		t.Fatalf("NewAutoCommitter: %v", err)
+	}
+	for _, hour := range []int{-1, 24, 25} {
+		if err := ac.RunDaily(context.Background(), hour); err == nil {
+			t.Errorf("hour=%d 应返回错误", hour)
+		}
+	}
+}
+
+// TestRunDailyCancelExit 验收：ctx 取消后 RunDaily 优雅退出（不等到下一个
+// hour 点），且不触发任何提交。
+func TestRunDailyCancelExit(t *testing.T) {
+	rec := &recordingRunner{}
+	ac, err := NewAutoCommitter(Options{Root: t.TempDir(), Enabled: true, Runner: rec.run, Logf: t.Logf})
+	if err != nil {
+		t.Fatalf("NewAutoCommitter: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 已取消的 ctx
+	start := time.Now()
+	if err := ac.RunDaily(ctx, 0); err != nil {
+		t.Fatalf("RunDaily: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("RunDaily 未在 ctx 取消后快速返回，实际 %v", elapsed)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("ctx 已取消不应触发任何 git 调用：%v", rec.calls)
+	}
+}
+
+// TestRunDailyFiresOnSchedule 验收 2：RunDaily 到达下一个 hour 点（0 点）
+// 时触发一次 Commit，随后顺延次日继续等待；ctx 取消时优雅退出。
+// 不真等一天：注入伪时钟，首次取 23:59:59.999（→ 0 点，等待 ~1ms 即触发），
+// 此后取次日 00:00:30（→ 下一个 0 点，等待约一天）。
+func TestRunDailyFiresOnSchedule(t *testing.T) {
+	rec := &recordingRunner{staged: true, diff: []byte("notes/a.md\n")}
+	ac, err := NewAutoCommitter(Options{Root: t.TempDir(), Enabled: true, Runner: rec.run, Logf: t.Logf})
+	if err != nil {
+		t.Fatalf("NewAutoCommitter: %v", err)
+	}
+	var calls atomic.Int32
+	ac.now = func() time.Time {
+		if calls.Add(1) == 1 {
+			return time.Date(2026, 8, 22, 23, 59, 59, 999_000_000, time.Local)
+		}
+		return time.Date(2026, 8, 23, 0, 0, 30, 0, time.Local)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ac.RunDaily(ctx, 0) }()
+	defer cancel()
+
+	// 首次触发（等待 ~1ms）：轮询直到记录到 git commit 调用。
+	waitFor(t, 5*time.Second, func() bool { return hasGitCall(rec, "commit") })
+	// 提交完成后 RunDaily 立即进入第二轮调度（now 第二次调用），
+	// 此时已创建「下一个 0 点」的长定时器。
+	waitFor(t, 5*time.Second, func() bool { return calls.Load() == 2 })
+
+	// 取消 ctx：RunDaily 应优雅退出（不真等一天）。
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunDaily: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunDaily 未在 ctx 取消后退出（goroutine 泄漏）")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("now 调用次数 = %d, want 2（首次触发 + 顺延次日各一次）", got)
+	}
+	if got := countGitCalls(rec, "commit"); got != 1 {
+		t.Fatalf("commit 调用次数 = %d, want 1（每日仅一次）", got)
+	}
+}
+
+// hasGitCall 报告 recordingRunner 是否记录过 git <sub> 调用。
+func hasGitCall(rec *recordingRunner, sub string) bool {
+	return countGitCalls(rec, sub) > 0
+}
+
+// countGitCalls 统计 recordingRunner 记录过的 git <sub> 调用次数。
+func countGitCalls(rec *recordingRunner, sub string) int {
+	n := 0
+	for _, c := range rec.calls {
+		if len(c) >= 2 && c[0] == "git" && c[1] == sub {
+			n++
+		}
+	}
+	return n
+}
+
+// waitFor 轮询 cond 直到为真或超时（测试辅助，短间隔小步进）。
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("等待条件超时（%v）", timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

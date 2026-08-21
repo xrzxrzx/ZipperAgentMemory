@@ -12,9 +12,9 @@
   - 🔒 远端无任何敏感文件（记忆库已剥离，gitignore 锚定 `/memory/`）
 - ✅ **设计变更已批准**（§10 决策 3/6/7）：autocommit 每日 0 点默认开启 + 主动提交；公网 8931 + IP 白名单；密码薄导入
 - ✅ **密码薄导入**：xlsx（57 行，无图片）→ `memory/structured/password-vault.csv`；服务器/数据库密码 → `servers.csv`（仅本地，不入库）
-- ⏳ **变更编码中**（子 Agent 777b22f0）：RunDaily 定时提交 + git-commit 子命令 + IP 白名单中间件
-- ⏳ **待用户输入**：IP 白名单列表（允许访问 8931 的 IP）
-- ✅ 远端同步：GitHub HEAD=6ebc236，Gitee HEAD=6ebc236
+- ⏳ **变更编码中**（子 Agent 777b22f0 已完成主体 + a82a1b5d 补配置文件）：RunDaily 定时提交 + git-commit 子命令 + IP 白名单（flag + JSON 配置文件双通道）
+- ⏳ **待部署**：白名单 = 127.0.0.1 + 120.228.126.4（用户确认）；在外笔记本走 SSH 隧道
+- ✅ 远端同步：GitHub HEAD=286594f，Gitee HEAD=286594f
 
 ## 项目定义
 

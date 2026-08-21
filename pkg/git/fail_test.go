@@ -53,7 +53,7 @@ func TestCommitErrorPropagation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = ac.Commit()
+			_, err = ac.Commit()
 			if err == nil {
 				t.Fatal("Commit 应失败")
 			}

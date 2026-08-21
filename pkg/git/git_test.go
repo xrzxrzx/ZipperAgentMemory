@@ -65,8 +65,12 @@ func TestCommitUsesArgumentArrays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAutoCommitter: %v", err)
 	}
-	if err := ac.Commit(); err != nil {
+	committed, err := ac.Commit()
+	if err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+	if !committed {
+		t.Fatal("有暂存变更应返回 committed=true")
 	}
 
 	want := [][]string{
@@ -112,8 +116,12 @@ func TestCommitSkipsWhenNoStagedChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAutoCommitter: %v", err)
 	}
-	if err := ac.Commit(); err != nil {
+	committed, err := ac.Commit()
+	if err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+	if committed {
+		t.Fatal("无暂存变更应返回 committed=false")
 	}
 	for _, call := range rec.calls {
 		if len(call) >= 2 && call[1] == "commit" {
@@ -131,8 +139,12 @@ func TestDisabledCommitIssuesNoCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAutoCommitter: %v", err)
 	}
-	if err := ac.Commit(); err != nil {
+	committed, err := ac.Commit()
+	if err != nil {
 		t.Fatalf("Commit: %v", err)
+	}
+	if committed {
+		t.Fatal("关闭状态应返回 committed=false")
 	}
 	if len(rec.calls) != 0 {
 		t.Fatalf("disabled autocommit issued %d git commands: %v", len(rec.calls), rec.calls)

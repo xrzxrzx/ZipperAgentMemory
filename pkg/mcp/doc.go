@@ -13,6 +13,9 @@
 //     与 stdio（按需拉起模式，[Server.RunStdio]）；
 //   - 安全：所有 path 参数经 pkg/memory 沙箱校验（含符号链接/junction 组件级
 //     解析），路径穿越返回结构化 MCP 工具错误（IsError=true，LLM 可见可自纠正）；
+//   - 访问控制（design.md §10 决策 6）：[IPAllowList] 对 streamable HTTP 实施
+//     远端 IP 精确白名单（serve 的 -allow-ips；空白名单不限制，本地模式无感知），
+//     供 8931 端口公网部署场景使用；
 //   - 并发：写操作复用 Store 互斥锁串行化 + 「临时文件 → rename」原子写，
 //     成功后同步更新索引（设计文档 §6.2 写入顺序）；
 //   - 健壮性：handler 外层统一 recover，panic 转为 MCP 工具错误响应，不拖垮会话。
