@@ -1,5 +1,6 @@
 # 调研缓存（子 Agent 工作目录，不入库）
 .research-cache/
+.research/
 
 # 构建产物
 bin/
