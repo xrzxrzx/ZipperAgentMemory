@@ -43,6 +43,7 @@ ssh minichat-server 'cd /opt/zipper-agent-memory && ./zipper-agent-memoryd git-c
 
 ## 客户端接入（Claude/Codex）
 
-- 家里直连：`http://8.141.89.50:8931/mcp`（IP 白名单：127.0.0.1 + 120.228.126.4）
+- 家里直连：`http://8.141.89.50:8931/mcp`（IP 白名单：127.0.0.1 + 120.228.125.194，2026-09-20 更新）
+  - ⚠️ 家宽是**动态 IP**，且白名单为**精确匹配**（不支持网段）：一旦漂移即 403。排查见 `decisions/2026-09-20-公网IP漂移-MCP-403.md`
 - 外出：`ssh -N -L 8931:127.0.0.1:8931 minichat-server` 后连 `http://127.0.0.1:8931/mcp`
 - MCP 工具：`memory_read/write/append/search/list/status`（6 个，带行为标注）
