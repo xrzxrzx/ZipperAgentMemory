@@ -47,6 +47,7 @@ ssh minichat-server 'cd /opt/zipper-agent-memory && ./zipper-agent-memoryd git-c
 
 - DSH 配置 `~/.dsh/dsh-mcp-client-v2.json` 的 `url` = `http://127.0.0.1:8931/mcp`
 - 隧道监督者 `~/.dsh/zipper-memory-tunnel.ps1`（断线 5s 自动重连）+ 启动文件夹 vbs 登录自启
+  - ⚠️ 手工拉起必须用 `explorer.exe "<vbs 路径>"` 代启；**别在 DSH 会话里直接跑**，否则 DSH 重启会把隧道连带杀掉
 - 服务端只看到 `127.0.0.1`（白名单内）→ **公网 IP 漂移免疫**；详见 `decisions/2026-09-29-MCP隧道根治.md`
 
 **应急方案：公网直连**（仅当本机出口 IP 与白名单一致时可用）
