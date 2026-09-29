@@ -45,7 +45,21 @@ ssh minichat-server 'cd /opt/zipper-agent-memory && ./zipper-agent-memoryd git-c
 
 **主方案：SSH 隧道（2026-09-29 起，已配成常驻自启）**
 
-- DSH 配置 `~/.dsh/dsh-mcp-client-v2.json` 的 `url` = `http://127.0.0.1:8931/mcp`
+- DSH 侧落点是 **profile patch**：在 `~/.dsh/profiles/desktop/cordis.patch.yml` 里追加一个 **`- insert:` 块**
+  （顶层 `- id: <新 id>` 是「定向覆盖**已存在**条目」，用它新增会报 `patch: entry "..." not found` —— 2026-09-29 重装实测踩过）：
+
+  ```yaml
+  - insert:
+      - id: mcp-zipper-memory
+        name: '@deepseek-ai/dsh-mcp-client'
+        config:
+          serverName: zipper-memory          # 决定工具名 mcp__zipper-memory__*
+          transport: streamable-http
+          url: http://127.0.0.1:8931/mcp
+  ```
+
+  写入必须用**临时文件 + 原子移动**（`Move-Item -Force`）才会被 watcher 认作一次 change；改完 `logs/host/dsh-<日期>.log` 应无 `YAMLException`、无 `entry ... not found`。
+  > ⚠️ **旧说法已作废**：`~/.dsh/dsh-mcp-client-v2.json` 在本版 DSH（0.1.7-rc.2）里**并不存在**——全安装目录 grep `dsh-mcp-client-v2.json` 零命中，`dsh-mcp-client` 插件只认 cordis 配置（2026-09-29 新机重装实测）。
 - 隧道监督者 `~/.dsh/zipper-memory-tunnel.ps1`（断线 5s 自动重连）+ 启动文件夹 vbs 登录自启
   - ⚠️ 手工拉起必须用 `explorer.exe "<vbs 路径>"` 代启；**别在 DSH 会话里直接跑**，否则 DSH 重启会把隧道连带杀掉
 - 服务端只看到 `127.0.0.1`（白名单内）→ **公网 IP 漂移免疫**；详见 `decisions/2026-09-29-MCP隧道根治.md`
