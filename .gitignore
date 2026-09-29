@@ -2,6 +2,9 @@
 .research-cache/
 .research/
 
+# 红队测试资产（2026-08-29 本地收集的前端打包产物，非本项目产物，不入库）
+redteam_assets/
+
 # 构建产物
 bin/
 dist/
