@@ -43,7 +43,16 @@ ssh minichat-server 'cd /opt/zipper-agent-memory && ./zipper-agent-memoryd git-c
 
 ## 客户端接入（Claude/Codex）
 
-- 家里直连：`http://8.141.89.50:8931/mcp`（IP 白名单：127.0.0.1 + 120.228.125.194，2026-09-20 更新）
-  - ⚠️ 家宽是**动态 IP**，且白名单为**精确匹配**（不支持网段）：一旦漂移即 403。排查见 `decisions/2026-09-20-公网IP漂移-MCP-403.md`
-- 外出：`ssh -N -L 8931:127.0.0.1:8931 minichat-server` 后连 `http://127.0.0.1:8931/mcp`
+**主方案：SSH 隧道（2026-09-29 起，已配成常驻自启）**
+
+- DSH 配置 `~/.dsh/dsh-mcp-client-v2.json` 的 `url` = `http://127.0.0.1:8931/mcp`
+- 隧道监督者 `~/.dsh/zipper-memory-tunnel.ps1`（断线 5s 自动重连）+ 启动文件夹 vbs 登录自启
+- 服务端只看到 `127.0.0.1`（白名单内）→ **公网 IP 漂移免疫**；详见 `decisions/2026-09-29-MCP隧道根治.md`
+
+**应急方案：公网直连**（仅当本机出口 IP 与白名单一致时可用）
+
+- `http://8.141.89.50:8931/mcp`
+  - ⚠️ 白名单是**精确 IP 匹配**（不支持网段），家宽 IP 漂移即 403。排查见 `decisions/2026-09-20-公网IP漂移-MCP-403.md`
+
+**其他设备 / 外出**：`ssh -N -L 8931:127.0.0.1:8931 minichat-server` 后连 `http://127.0.0.1:8931/mcp`
 - MCP 工具：`memory_read/write/append/search/list/status`（6 个，带行为标注）
