@@ -136,6 +136,12 @@ async function openFile(path) {
     if (data.kind === 'markdown') {
       // 服务端已渲染且转义了原始 HTML，可安全注入。
       body.innerHTML = data.html;
+    } else if (data.kind === 'csv') {
+      // 服务端用标准库解析 CSV/TSV 并逐单元格转义，可安全注入。
+      body.innerHTML = data.html;
+      if (data.truncated) {
+        body.appendChild(el('p', 'hint', '表格仅显示前 5000 行，完整内容请点上方「下载」。'));
+      }
     } else if (data.kind === 'text') {
       // 用 textContent 写入原文：浏览器负责转义，不做 HTML 解析。
       const pre = el('pre');

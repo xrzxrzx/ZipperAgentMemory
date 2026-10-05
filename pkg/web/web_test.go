@@ -70,6 +70,10 @@ func newTestEnv(t *testing.T) *testEnv {
 		// 隐藏项：用于验证阅读页不暴露点目录/点文件（含 .git/ 这类仓库内部）。
 		".git/config":      "[core]\n\trepositoryformatversion = 0\n",
 		"notes/.secret.md": "隐藏文件不应出现在阅读页。\n",
+		// CSV/TSV：验证表格渲染（引号内逗号、单元格转义、制表符分隔）。
+		"structured/vault.csv": "name,secret\n\"weird, name\",p@ssw0rd\n<b>html</b>,x\n",
+		"structured/tab.tsv":   "列一\t列二\n1\t2\n",
+		"structured/weird.csv": "\"unclosed\nx,y\n",
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, filepath.FromSlash(rel))
@@ -318,7 +322,8 @@ func TestKindOf(t *testing.T) {
 		{"notes/a.md", []byte("中文"), KindMarkdown},
 		{"notes/a.markdown", []byte("中文"), KindMarkdown},
 		{"notes/a.txt", []byte("纯文本"), KindText},
-		{"structured/x.csv", []byte("a,b\n1,2\n"), KindText},
+		{"structured/x.csv", []byte("a,b\n1,2\n"), KindCSV},
+		{"structured/x.tsv", []byte("a\tb\n1\t2\n"), KindCSV},
 		{"notes/bin.dat", []byte{'a', 0, 'b'}, KindBinary},
 	}
 	for _, c := range cases {
@@ -326,6 +331,108 @@ func TestKindOf(t *testing.T) {
 			t.Errorf("KindOf(%q) = %v，want %v", c.rel, got, c.want)
 		}
 	}
+}
+
+// TestRenderCSV 验收（CSV/TSV 表格渲染）：标准库解析 + 逐单元格转义 + 首行表头
+// + 行数截断 + BOM 剥离 + 按扩展名选分隔符 + 畸形输入可回退。
+func TestRenderCSV(t *testing.T) {
+	t.Run("基本表格与表头", func(t *testing.T) {
+		out, truncated, err := RenderCSV([]byte("name,age\nAlice,30\nBob,25\n"), ',', csvMaxRows)
+		if err != nil {
+			t.Fatalf("RenderCSV: %v", err)
+		}
+		if truncated {
+			t.Error("3 行不应被截断")
+		}
+		for _, want := range []string{`<table class="csv">`, "<thead><tr><th>name</th><th>age</th></tr></thead>", "<td>Alice</td>", "<td>25</td>"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("表格缺少 %q：%s", want, out)
+			}
+		}
+	})
+
+	t.Run("引号内逗号/换行/转义引号", func(t *testing.T) {
+		src := "a,b\n\"x, y\",\"line1\nline2\"\n\"he said \"\"hi\"\"\",z\n"
+		out, _, err := RenderCSV([]byte(src), ',', csvMaxRows)
+		if err != nil {
+			t.Fatalf("RenderCSV: %v", err)
+		}
+		for _, want := range []string{"<td>x, y</td>", "<td>line1\nline2</td>", "<td>he said &#34;hi&#34;</td>"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("未按 CSV 语义解析 %q：%s", want, out)
+			}
+		}
+	})
+
+	t.Run("单元格 HTML 转义", func(t *testing.T) {
+		out, _, err := RenderCSV([]byte("h\n<script>alert(1)</script>\n"), ',', csvMaxRows)
+		if err != nil {
+			t.Fatalf("RenderCSV: %v", err)
+		}
+		if strings.Contains(strings.ToLower(out), "<script") {
+			t.Errorf("单元格未转义：%s", out)
+		}
+		if !strings.Contains(out, "&lt;script&gt;") {
+			t.Errorf("应输出转义实体：%s", out)
+		}
+	})
+
+	t.Run("BOM 剥离", func(t *testing.T) {
+		out, _, err := RenderCSV([]byte("\ufeffname,age\nA,1\n"), ',', csvMaxRows)
+		if err != nil {
+			t.Fatalf("RenderCSV: %v", err)
+		}
+		if !strings.Contains(out, "<th>name</th>") {
+			t.Errorf("BOM 未剥离，表头异常：%s", out)
+		}
+	})
+
+	t.Run("行数截断", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("h\n")
+		for i := 0; i < 10; i++ {
+			fmt.Fprintf(&b, "row%d\n", i)
+		}
+		out, truncated, err := RenderCSV([]byte(b.String()), ',', 3)
+		if err != nil {
+			t.Fatalf("RenderCSV: %v", err)
+		}
+		if !truncated {
+			t.Error("超过 maxRows 应标记截断")
+		}
+		if strings.Contains(out, "row5") {
+			t.Errorf("超出上限的行不应渲染：%s", out)
+		}
+		if !strings.Contains(out, "<td>row1</td>") {
+			t.Errorf("上限内的行应渲染：%s", out)
+		}
+	})
+
+	t.Run("TSV 分隔符", func(t *testing.T) {
+		out, _, err := RenderCSV([]byte("a\tb\n1\t2\n"), '\t', csvMaxRows)
+		if err != nil {
+			t.Fatalf("RenderCSV: %v", err)
+		}
+		if !strings.Contains(out, "<th>a</th><th>b</th>") || !strings.Contains(out, "<td>1</td><td>2</td>") {
+			t.Errorf("TSV 未按制表符解析：%s", out)
+		}
+	})
+
+	t.Run("列数不齐容忍", func(t *testing.T) {
+		out, _, err := RenderCSV([]byte("a,b,c\n1,2\n3,4,5,6\n"), ',', csvMaxRows)
+		if err != nil {
+			t.Fatalf("列数不齐不应报错: %v", err)
+		}
+		if !strings.Contains(out, "<td>1</td><td>2</td>") {
+			t.Errorf("短行应正常渲染：%s", out)
+		}
+	})
+
+	t.Run("非法分隔符报错供调用方回退", func(t *testing.T) {
+		if _, _, err := RenderCSV([]byte("a,b\n"), '"', 10); err == nil {
+			t.Error("非法分隔符应返回错误，由调用方回退为纯文本")
+		}
+	})
 }
 
 // ---- 访问控制 ----
@@ -660,6 +767,58 @@ func TestLogForgingSanitized(t *testing.T) {
 	}
 	if !strings.Contains(logs, "?INJECTED") {
 		t.Errorf("控制字符应被替换为 '?'，实际：%q", logs)
+	}
+}
+
+// TestCSVThroughAPI 验收（CSV 表格渲染的接口层）：`/memory/api/file` 对
+// .csv/.tsv 返回 kind=csv + 表格 HTML；单元格转义；畸形 CSV 不 500。
+func TestCSVThroughAPI(t *testing.T) {
+	env := newTestEnv(t)
+
+	res := env.do(t, http.MethodGet, "/memory/api/file?path=structured%2Fvault.csv", testToken, "application/json")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("CSV 读取 = %d，want 200", res.StatusCode)
+	}
+	var f fileResponse
+	decodeJSON(t, res, &f)
+	if f.Kind != string(KindCSV) {
+		t.Errorf("kind = %q，want %q", f.Kind, KindCSV)
+	}
+	for _, want := range []string{`<table class="csv">`, "<th>name</th><th>secret</th>", "<td>weird, name</td>", "<td>p@ssw0rd</td>"} {
+		if !strings.Contains(f.HTML, want) {
+			t.Errorf("表格缺少 %q：%s", want, f.HTML)
+		}
+	}
+	// 单元格里的尖括号必须转义（前端以 innerHTML 注入）。
+	if strings.Contains(f.HTML, "<b>html</b>") || !strings.Contains(f.HTML, "&lt;b&gt;html&lt;/b&gt;") {
+		t.Errorf("单元格未转义：%s", f.HTML)
+	}
+	if f.Truncated {
+		t.Error("小表不应标记截断")
+	}
+
+	// TSV 按制表符渲染。
+	res = env.do(t, http.MethodGet, "/memory/api/file?path=structured%2Ftab.tsv", testToken, "application/json")
+	var tsv fileResponse
+	decodeJSON(t, res, &tsv)
+	if tsv.Kind != string(KindCSV) || !strings.Contains(tsv.HTML, "<th>列一</th><th>列二</th>") {
+		t.Errorf("TSV 渲染异常：kind=%s html=%s", tsv.Kind, tsv.HTML)
+	}
+
+	// 畸形 CSV：不得 5xx（要么表格要么回退纯文本），且下载仍可用。
+	res = env.do(t, http.MethodGet, "/memory/api/file?path=structured%2Fweird.csv", testToken, "application/json")
+	if res.StatusCode >= 500 {
+		t.Errorf("畸形 CSV = %d，不应为 5xx", res.StatusCode)
+	}
+	if res.StatusCode == http.StatusOK {
+		var weird fileResponse
+		decodeJSON(t, res, &weird)
+		if weird.Kind != string(KindCSV) && weird.Kind != string(KindText) {
+			t.Errorf("畸形 CSV 的 kind = %q，want csv 或 text", weird.Kind)
+		}
+	}
+	if res := env.do(t, http.MethodGet, "/memory/api/raw?path=structured%2Fweird.csv", testToken, "application/json"); res.StatusCode != http.StatusOK {
+		t.Errorf("畸形 CSV 仍应可下载，实际 %d", res.StatusCode)
 	}
 }
 

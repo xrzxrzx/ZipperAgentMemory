@@ -149,16 +149,18 @@ func hasHiddenComponent(rel string) bool {
 }
 
 // fileResponse 是 /memory/api/file 的响应体。
-// kind=markdown 时给 html；kind=text 时给 text（前端用 textContent 写入，
-// 因此这里给**原文**而不是预转义文本，避免二次转义）；
-// kind=binary/large 时只给大小与 mtime，内容走下载接口。
+// kind=markdown/csv 时给 html（服务端已逐单元格/逐段转义）；
+// kind=text 时给 text（前端用 textContent 写入，因此这里给**原文**而不是
+// 预转义文本，避免二次转义）；kind=binary/large 时只给大小与 mtime，
+// 内容走下载接口。truncated 仅对表格有意义：行数超过渲染上限。
 type fileResponse struct {
-	Path  string `json:"path"`
-	Size  int    `json:"size"`
-	MTime string `json:"mtime,omitempty"`
-	Kind  string `json:"kind"`
-	HTML  string `json:"html,omitempty"`
-	Text  string `json:"text,omitempty"`
+	Path      string `json:"path"`
+	Size      int    `json:"size"`
+	MTime     string `json:"mtime,omitempty"`
+	Kind      string `json:"kind"`
+	HTML      string `json:"html,omitempty"`
+	Text      string `json:"text,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // handleFile 读取单个文件并按类型给出展示内容。
@@ -201,6 +203,18 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Kind = string(KindMarkdown)
 		resp.HTML = rendered
+	case KindCSV:
+		rendered, truncated, err := RenderCSV(data, csvDelimiter(rel), csvMaxRows)
+		if err != nil {
+			// 解析失败回退为纯文本展示：畸形 CSV 是内容问题，不该变成 500。
+			s.logf("web: csv fallback to text for %s: %v", sanitizeLogField(rel), err)
+			resp.Kind = string(KindText)
+			resp.Text = string(data)
+			break
+		}
+		resp.Kind = string(KindCSV)
+		resp.HTML = rendered
+		resp.Truncated = truncated
 	default:
 		resp.Kind = string(KindText)
 		resp.Text = string(data)
