@@ -268,7 +268,7 @@ zipper-agent-memoryd（单进程）
 | POST | `/memory/api/logout` | 需要 | 清 Cookie |
 | GET | `/memory/api/status` | 需要 | 文件数 / 总字节 / 最近修改 |
 | GET | `/memory/api/tree?path=` | 需要 | 目录项（不递归，惰性加载） |
-| GET | `/memory/api/file?path=` | 需要 | 正文：`markdown`（渲染）/ `text`（原文）/ `binary`·`large`（仅提示下载）；内联展示上限 1 MiB |
+| GET | `/memory/api/file?path=` | 需要 | 正文：`markdown`（渲染）/ **`csv`**（`.csv` 逗号、`.tsv` 制表符**解析为表格**：首行作表头、单元格逐个转义、超 5000 行截断并置 `truncated`、解析失败回退 `text`）/ `text`（原文）/ `binary`·`large`（仅提示下载）；内联展示上限 1 MiB |
 | GET | `/memory/api/raw?path=` | 需要 | 原始字节下载（`Content-Disposition` 按 RFC 5987 编码中文文件名） |
 | GET | `/memory/api/search?q=&mode=&limit=` | 需要 | 全文检索；`mode=and`（默认，全部命中）/`or`（任一命中）；`limit` 上限 100 |
 | GET | `/memory/static/*` | 需要 | 内嵌静态资源（`go:embed`，无 CDN 依赖） |
@@ -309,5 +309,6 @@ zipper-agent-memoryd（单进程）
 | `search`（CLI） | 同上（默认 AND） |
 | 索引进度 | **无需重建**：FTS5 表结构与单字切分方式未变，仅查询串构造变化 |
 | 新增依赖 | `github.com/yuin/goldmark`（纯 Go、MIT、无 CGO，仅用于渲染） |
+| `/memory/api/file` 响应 | 新增 `kind: "csv"`（值域扩展）与 `truncated` 字段（表格行数截断标记，2026-10-05 追加 REQ-09）；CSV/TSV 解析在服务端用标准库 `encoding/csv` 完成，逐单元格 `html.EscapeString` 转义后交给前端注入 |
 | 资源 | goldmark + 内嵌静态资源约 +1–3MB，仍在 §3.3 的 60MB 红线内 |
 
