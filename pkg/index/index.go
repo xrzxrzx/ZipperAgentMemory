@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -201,27 +202,61 @@ func (ix *Index) Remove(path string) error {
 	return nil
 }
 
-// Search 全文检索 query，返回最多 limit 条命中（默认 20）。
-//
-// 查询处理：query 与入库侧同样经 tokenizeForFTS 单字切分，再整体包成
-// FTS5 双引号短语（内部双引号加倍转义）——保证任意用户输入不触发
-// MATCH 语法错误，多词查询按短语连续匹配，中文按单字短语匹配。
-// 命中片段取自正文列（snippet），中文空格已还原。
+// Mode 指定多关键词查询中各词元之间的连接语义（query 按空白切分）。
+type Mode int
+
+const (
+	// ModeAND 要求全部词元都命中（默认）。
+	ModeAND Mode = iota
+	// ModeOR 命中任一词元即可。
+	ModeOR
+)
+
+// String 返回模式的稳定文本表示（"and"/"or"），供 CLI/MCP/Web 层复述与回显。
+func (m Mode) String() string {
+	if m == ModeOR {
+		return "or"
+	}
+	return "and"
+}
+
+// Search 全文检索 query，返回最多 limit 条命中（默认 20），多词元语义为 AND。
+// 等价于 SearchMode(query, limit, ModeAND)，保留为兼容入口。
 func (ix *Index) Search(query string, limit int) ([]Result, error) {
+	return ix.SearchMode(query, limit, ModeAND)
+}
+
+// SearchMode 全文检索 query，mode 决定多个词元之间的连接语义。
+//
+// 查询处理：query 先按空白切分为若干词元，每个词元与入库侧同样经
+// tokenizeForFTS 单字切分，再包成 FTS5 双引号短语（内部双引号加倍转义），
+// 最后按 mode 以 AND / OR 连接——保证任意用户输入都不触发 MATCH 语法错误，
+// 且中文仍按单字短语匹配（"语言" 能命中正文中的「语言学习」）。
+//
+// 与旧行为（整串当一个连续短语）的差异：`隧道 端口` 旧语义要求四字连续，
+// 现语义为「两词都出现」，即用户直觉上的多关键词检索。
+//
+// 不含任何可检索字符的词元（纯标点等）会被丢弃；全部词元都被丢弃时
+// 返回 ErrEmptyQuery（而不是让 FTS5 报语法错误）。
+// 命中片段取自正文列（snippet），中文空格已还原。
+func (ix *Index) SearchMode(query string, limit int, mode Mode) ([]Result, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, ErrEmptyQuery
 	}
 	if limit <= 0 {
 		limit = 20
 	}
-	phrase := `"` + strings.ReplaceAll(tokenizeForFTS(query), `"`, `""`) + `"`
+	match := buildMatch(query, mode)
+	if match == "" {
+		return nil, ErrEmptyQuery
+	}
 
 	rows, err := ix.db.Query(`
 SELECT path, snippet(docs_fts, 3, '[', ']', '…', 24)
 FROM docs_fts
 WHERE docs_fts MATCH ?
 ORDER BY rank
-LIMIT ?`, phrase, limit)
+LIMIT ?`, match, limit)
 	if err != nil {
 		return nil, fmt.Errorf("index: search %q: %w", query, err)
 	}
@@ -240,4 +275,31 @@ LIMIT ?`, phrase, limit)
 		return nil, fmt.Errorf("index: search rows: %w", err)
 	}
 	return out, nil
+}
+
+// buildMatch 把用户查询构造成 FTS5 MATCH 表达式：按空白切分词元，逐词元
+// 单字切分并包成双引号短语，再按 mode 用 AND / OR 连接；无有效词元时返回空串。
+func buildMatch(query string, mode Mode) string {
+	sep := " AND "
+	if mode == ModeOR {
+		sep = " OR "
+	}
+	terms := make([]string, 0, 4)
+	for _, raw := range strings.Fields(query) {
+		if !hasIndexableRune(raw) {
+			continue // 纯标点词元在 FTS5 里不产生 token，包成短语会触发语法错误
+		}
+		terms = append(terms, `"`+strings.ReplaceAll(tokenizeForFTS(raw), `"`, `""`)+`"`)
+	}
+	return strings.Join(terms, sep)
+}
+
+// hasIndexableRune 报告 s 是否含至少一个可检索字符（字母/数字/CJK）。
+func hasIndexableRune(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }

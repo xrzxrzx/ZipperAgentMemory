@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"zipper-agent-memory/pkg/index"
 	"zipper-agent-memory/pkg/memory"
 )
 
@@ -66,10 +67,11 @@ func (s *Server) registerTools(sdkSrv *sdk.Server) {
 	// memory_search：readOnly
 	sdkSrv.AddTool(&sdk.Tool{
 		Name:        "memory_search",
-		Description: "FTS5 全文检索记忆库（readOnly），返回 文件路径+命中片段，最多 limit 条（默认 20）。query 为要检索的关键词，支持中文（单字切分，与索引侧一致）。",
+		Description: "FTS5 全文检索记忆库（readOnly），返回 文件路径+命中片段，最多 limit 条（默认 20）。query 为要检索的关键词，支持中文（单字切分，与索引侧一致）；多个关键词用空格分隔：mode=and（默认）要求全部关键词命中，mode=or 命中任一即可。",
 		InputSchema: inputSchema(map[string]any{
-			"query": prop("string", "检索关键词", nil),
+			"query": prop("string", "检索关键词（多个关键词以空格分隔）", nil),
 			"limit": prop("integer", "最多返回命中条数（默认 20）", 20),
+			"mode":  prop("string", "多关键词匹配语义：and=全部命中（默认）/ or=任一命中", "and"),
 		}, "query"),
 		Annotations: readOnlyAnnotations("检索记忆库"),
 	}, withRecovery("memory_search", s.handleSearch))
@@ -260,6 +262,7 @@ func (s *Server) handleSearch(_ context.Context, req *sdk.CallToolRequest) (*sdk
 	var args struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
+		Mode  string `json:"mode"`
 	}
 	if err := decodeArgs("memory_search", req.Params.Arguments, &args); err != nil {
 		return errResult(err), nil
@@ -267,7 +270,11 @@ func (s *Server) handleSearch(_ context.Context, req *sdk.CallToolRequest) (*sdk
 	if strings.TrimSpace(args.Query) == "" {
 		return errResult(errors.New("memory_search: missing required argument \"query\"")), nil
 	}
-	results, err := s.ix.Search(args.Query, args.Limit)
+	mode, err := parseSearchMode(args.Mode)
+	if err != nil {
+		return errResult(fmt.Errorf("memory_search: %w", err)), nil
+	}
+	results, err := s.ix.SearchMode(args.Query, args.Limit, mode)
 	if err != nil {
 		return errResult(fmt.Errorf("memory_search: %w", err)), nil
 	}
@@ -280,6 +287,20 @@ func (s *Server) handleSearch(_ context.Context, req *sdk.CallToolRequest) (*sdk
 		fmt.Fprintf(&b, "%s: %s\n", r.Path, r.Snippet)
 	}
 	return textResult(b.String()), nil
+}
+
+// parseSearchMode 解析 memory_search 的 mode 参数（大小写不敏感）：
+// 缺省/空串与 "and" 等价（默认全部命中），"or" 为任一命中，其余取值报错
+// （不静默回退，避免调用方以为生效了实际没有）。
+func parseSearchMode(s string) (index.Mode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "and":
+		return index.ModeAND, nil
+	case "or":
+		return index.ModeOR, nil
+	default:
+		return index.ModeAND, fmt.Errorf("invalid mode %q (want \"and\" or \"or\")", s)
+	}
 }
 
 func (s *Server) handleList(_ context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {

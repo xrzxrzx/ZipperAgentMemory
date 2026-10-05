@@ -44,6 +44,33 @@ func searchPaths(t *testing.T, ix *Index, query string) []string {
 	return paths
 }
 
+// searchPathsMode 返回指定语义下 SearchMode 命中的路径集合。
+func searchPathsMode(t *testing.T, ix *Index, query string, mode Mode) []string {
+	t.Helper()
+	rs, err := ix.SearchMode(query, 50, mode)
+	if err != nil {
+		t.Fatalf("SearchMode(%q, %v): %v", query, mode, err)
+	}
+	paths := make([]string, 0, len(rs))
+	for _, r := range rs {
+		paths = append(paths, r.Path)
+	}
+	return paths
+}
+
+// sameStrings 报告两个已排序切片是否完全一致。
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func contains(s []string, v string) bool {
 	for _, x := range s {
 		if x == v {
@@ -136,6 +163,66 @@ func TestSearchLimitAndEmptyQuery(t *testing.T) {
 	}
 	if _, err := ix.Search("   ", 5); err != ErrEmptyQuery {
 		t.Errorf("Search(blank) err = %v, want ErrEmptyQuery", err)
+	}
+}
+
+// TestSearchMultiTerm 验收（2026-10-05 缺陷修复）：多关键词按词元连接——
+// AND 要求全部词元命中，OR 命中任一即可；单词查询行为与旧版一致。
+func TestSearchMultiTerm(t *testing.T) {
+	ix := openTestIndex(t)
+	mustUpsert(t, ix, "notes/both.md", "隧道 与 端口 都出现")
+	mustUpsert(t, ix, "notes/tunnel.md", "只有隧道 的记录")
+	mustUpsert(t, ix, "notes/port.md", "只有端口 的记录")
+
+	// AND：两词都命中才算（旧实现此处为 0 命中——连续短语语义）。
+	if got := searchPathsMode(t, ix, "隧道 端口", ModeAND); !sameStrings(got, []string{"notes/both.md"}) {
+		t.Errorf("AND 查询 = %v, want [notes/both.md]", got)
+	}
+	// 兼容入口 Search 默认即 AND。
+	if got := searchPaths(t, ix, "隧道 端口"); !sameStrings(got, []string{"notes/both.md"}) {
+		t.Errorf("Search(隧道 端口) = %v, want [notes/both.md]", got)
+	}
+	// OR：任一命中即可。
+	got := searchPathsMode(t, ix, "隧道 端口", ModeOR)
+	sort.Strings(got)
+	if want := []string{"notes/both.md", "notes/port.md", "notes/tunnel.md"}; !sameStrings(got, want) {
+		t.Errorf("OR 查询 = %v, want %v", got, want)
+	}
+	// 单词查询两种语义一致。
+	for _, mode := range []Mode{ModeAND, ModeOR} {
+		if got := searchPathsMode(t, ix, "隧道", mode); len(got) != 2 {
+			t.Errorf("单词查询 mode=%v = %v, want 2 命中", mode, got)
+		}
+	}
+	// 词元内部仍按连续短语匹配（CJK 单字切分语义未变）。
+	mustUpsert(t, ix, "notes/lang.md", "语言学习笔记")
+	if got := searchPathsMode(t, ix, "语言", ModeAND); !contains(got, "notes/lang.md") {
+		t.Errorf("SearchMode(语言) = %v, want 含 notes/lang.md", got)
+	}
+}
+
+// TestSearchModeEdgeCases 覆盖无效与危险查询串：纯空白、纯标点、含引号/运算符。
+func TestSearchModeEdgeCases(t *testing.T) {
+	ix := openTestIndex(t)
+	mustUpsert(t, ix, "notes/a.md", "正常内容 隧道")
+
+	for _, q := range []string{"   ", "\t\n", `"""`, "…", "-"} {
+		if _, err := ix.SearchMode(q, 5, ModeAND); err != ErrEmptyQuery {
+			t.Errorf("SearchMode(%q) err = %v, want ErrEmptyQuery", q, err)
+		}
+	}
+	// 含双引号 / FTS5 运算符字符的输入不得触发 MATCH 语法错误。
+	for _, q := range []string{`"隧道`, `隧道"`, `隧道 AND`, "隧道*", "隧道( )"} {
+		if _, err := ix.SearchMode(q, 5, ModeAND); err != nil {
+			t.Errorf("SearchMode(%q) 不应报错: %v", q, err)
+		}
+	}
+}
+
+// TestModeString 保证模式文本表示稳定（CLI/MCP/Web 层回显依赖它）。
+func TestModeString(t *testing.T) {
+	if ModeAND.String() != "and" || ModeOR.String() != "or" {
+		t.Errorf("Mode.String() = %q/%q, want and/or", ModeAND.String(), ModeOR.String())
 	}
 }
 

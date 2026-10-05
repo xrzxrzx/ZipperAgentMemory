@@ -299,6 +299,56 @@ func TestSearchChineseHit(t *testing.T) {
 	}
 }
 
+// TestSearchModeArgument 验收（2026-10-05）：memory_search 的 mode 参数——
+// 默认（不传）与 and 等价、要求全部关键词命中；or 命中任一即可；
+// 大小写不敏感；非法取值报错而不静默回退。
+func TestSearchModeArgument(t *testing.T) {
+	s, sess, _ := newTestServer(t)
+	files := map[string]string{
+		"notes/both.md":   "隧道 与 端口 同时出现",
+		"notes/tunnel.md": "只有隧道",
+		"notes/port.md":   "只有端口",
+	}
+	for rel, content := range files {
+		if err := s.store.Write(rel, []byte(content), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.ix.Rebuild(s.store); err != nil {
+		t.Fatal(err)
+	}
+
+	// 默认（不传 mode）= AND：只有 both.md 两词都命中。
+	res := callTool(t, sess, "memory_search", map[string]any{"query": "隧道 端口"})
+	if res.IsError {
+		t.Fatalf("search 失败: %s", textOf(res))
+	}
+	if body := textOf(res); !strings.HasPrefix(body, "1 hit(s)") || !strings.Contains(body, "both.md") {
+		t.Errorf("默认 AND 应只命中 both.md，实际:\n%s", body)
+	}
+
+	// mode=or：三个文件都命中。
+	res = callTool(t, sess, "memory_search", map[string]any{"query": "隧道 端口", "mode": "or"})
+	if res.IsError {
+		t.Fatalf("search(or) 失败: %s", textOf(res))
+	}
+	if body := textOf(res); !strings.HasPrefix(body, "3 hit(s)") {
+		t.Errorf("mode=or 应命中 3 条，实际:\n%s", body)
+	}
+
+	// 大小写不敏感。
+	res = callTool(t, sess, "memory_search", map[string]any{"query": "隧道 端口", "mode": "AND"})
+	if res.IsError || !strings.HasPrefix(textOf(res), "1 hit(s)") {
+		t.Errorf("mode=AND（大写）应等价于默认，实际:\n%s", textOf(res))
+	}
+
+	// 非法 mode 报错。
+	res = callTool(t, sess, "memory_search", map[string]any{"query": "隧道", "mode": "xor"})
+	if !res.IsError || !strings.Contains(textOf(res), "invalid mode") {
+		t.Errorf("非法 mode 应报错，实际:\n%s", textOf(res))
+	}
+}
+
 // TestConcurrentAppendNoLoss 验收：并发写不丢数据（并发 append 全部落盘）。
 func TestConcurrentAppendNoLoss(t *testing.T) {
 	_, sess, _ := newTestServer(t)
