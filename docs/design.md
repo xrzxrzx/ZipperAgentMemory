@@ -256,8 +256,8 @@ zipper-agent-memoryd（单进程）
 | 口令 | 32 字节随机数的 base64url（43 字符），存**独立文件**（默认 `<config 同目录>/web-token`，权限 **0600**，内容一行）；**永不经命令行参数传递**（`ps` 可见） |
 | 生成/轮换 | `zipper-agent-memoryd web-token -config <path> -init [-force]`：原子写、自动 0600、屏幕只打印长度不回显口令 |
 | 提交方式 | ① 页面登录：`POST /memory/api/login` → 下发持久 Cookie（HttpOnly + SameSite=Lax，HTTPS 下置 Secure，Max-Age 10 年 = 「不过期」）；② 脚本：`Authorization: Bearer`。<br>**为什么必须用 Cookie**：浏览器顶层导航不发送 Authorization 头，纯 Bearer 方案一刷新即掉登录 |
-| 校验 | `crypto/subtle` 常量时间比较；失败按来源 IP 限流（10 次/分钟 → 429，表规模上限 1024） |
-| 日志 | 只记方法/路径/状态/来源/耗时；**不记 query 与 Cookie**（避免检索词与口令进日志） |
+| 校验 | `crypto/subtle` 常量时间比较；失败按**真实来源 IP** 限流（10 次/分钟 → 429，表规模上限 1024）。<br>来源 IP 取法（2026-10-05 决策）：**仅当 `RemoteAddr` 是回环地址时**才采信反代的 `X-Real-IP`（nginx 用 `proxy_set_header` 覆写，不可伪造），其次取 `X-Forwarded-For` 的**最后一段**（nginx 用 `$proxy_add_x_forwarded_for` 追加，末段才是本机观测到的来源）；非回环来源一律用其 `RemoteAddr`，伪造的来源头被忽略——否则反代下所有互联网来源会聚合成**全局单桶**，任意人连发 10 次错误口令即可让所有者 60 秒内无法新登录 |
+| 日志 | 只记方法/路径/状态/来源/耗时；**不记 query 与 Cookie**（避免检索词与口令进日志）；路径字段做控制字符消毒，防换行注入伪造日志行 |
 
 ### 11.4 路由（全部在 `/memory/` 前缀下）
 
@@ -273,7 +273,7 @@ zipper-agent-memoryd（单进程）
 | GET | `/memory/api/search?q=&mode=&limit=` | 需要 | 全文检索；`mode=and`（默认，全部命中）/`or`（任一命中）；`limit` 上限 100 |
 | GET | `/memory/static/*` | 需要 | 内嵌静态资源（`go:embed`，无 CDN 依赖） |
 
-未授权响应：`/memory/api/*` → 401；浏览器导航（Accept 含 `text/html`）→ 302 跳登录页；路径穿越 → 400（Linux 绝对路径亦 400，Windows 下为 404，两者都不返回根外内容）。
+未授权响应：`/memory/api/*` → 401；浏览器导航（Accept 含 `text/html`）→ 302 跳登录页；路径穿越 → 400（Linux 绝对路径亦 400，Windows 下为 404，两者都不返回根外内容）；目录路径 / 超长路径 / 含控制字符的路径 → 400；**含点分量的路径（`.git/…`、`.隐藏文件`）→ 404 且不出现在目录列表中**（2026-10-05 用户决策：阅读页不暴露点目录与点文件，含仓库内部；"." 表示根目录仍可用）。
 
 ### 11.5 安全边界
 
@@ -282,6 +282,7 @@ zipper-agent-memoryd（单进程）
 3. 文本类文件由前端以 `textContent` 写入（浏览器负责转义），服务端返回原文，避免二次转义；
 4. 响应带 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`；
 5. **残余风险（用户已知情接受）**：口令即全库（含密码资料）的唯一防线。泄露应对：轮换口令 + 立即修改库内涉及的密码。
+6. 阅读页**不暴露点目录/点文件**（`.git/` 等仓库内部不可见、不可读、不可下载）；检索侧天然一致——索引本就不收录隐藏文件（`pkg/index` ShouldIndex）。
 
 ### 11.6 配置
 
