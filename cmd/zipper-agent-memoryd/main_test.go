@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -161,4 +162,87 @@ func captureStdout(t *testing.T, fn func()) string {
 	_ = w.Close()
 	out, _ := io.ReadAll(r)
 	return string(out)
+}
+
+// TestServeFlagsWebAddrDefault 验收：-web-addr 默认空串（= 不启用阅读页，
+// 未配置时 serve 行为与旧版完全一致）。
+func TestServeFlagsWebAddrDefault(t *testing.T) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	sf := registerServeFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("解析默认 flag: %v", err)
+	}
+	if sf.webAddr != "" {
+		t.Fatalf("-web-addr 默认应为空（不启用阅读页），实际 %q", sf.webAddr)
+	}
+}
+
+// TestCmdWebToken 验收：口令子命令——-init 生成且只打印长度、无 -init 打印
+// 当前口令、已存在时拒绝覆盖、-force 完成轮换、缺失文件报错。
+func TestCmdWebToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "web-token")
+
+	out := captureStdout(t, func() {
+		if err := cmdWebToken([]string{"-token-file", path, "-init"}); err != nil {
+			t.Fatalf("web-token -init: %v", err)
+		}
+	})
+	if !strings.Contains(out, "wrote") {
+		t.Errorf("-init 输出应说明已写入，实际 %q", out)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) != 43 {
+		t.Errorf("口令长度 = %d，want 43（32 字节 base64url）", len(token))
+	}
+	if strings.Contains(out, token) {
+		t.Error("-init 不应把口令本身打印到屏幕")
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("口令文件权限 = %#o，want 0600", perm)
+		}
+	}
+
+	// 无 -init：打印当前口令（供人工取用）。
+	out = captureStdout(t, func() {
+		if err := cmdWebToken([]string{"-token-file", path}); err != nil {
+			t.Fatalf("web-token: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) != token {
+		t.Errorf("打印的口令 = %q，want %q", strings.TrimSpace(out), token)
+	}
+
+	// 已存在且无 -force：拒绝覆盖。
+	if err := cmdWebToken([]string{"-token-file", path, "-init"}); err == nil {
+		t.Error("已存在的口令文件应拒绝覆盖（需 -force）")
+	}
+
+	// -force：轮换成功且口令确实变化。
+	captureStdout(t, func() {
+		if err := cmdWebToken([]string{"-token-file", path, "-init", "-force"}); err != nil {
+			t.Fatalf("web-token -init -force: %v", err)
+		}
+	})
+	rotated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(rotated)) == token {
+		t.Error("轮换后口令应发生变化")
+	}
+
+	// 缺失文件：打印口令应报错（不静默创建空口令）。
+	if err := cmdWebToken([]string{"-token-file", filepath.Join(dir, "nope")}); err == nil {
+		t.Error("缺失口令文件应报错")
+	}
 }

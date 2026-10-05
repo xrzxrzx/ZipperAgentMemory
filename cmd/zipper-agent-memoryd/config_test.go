@@ -217,3 +217,104 @@ func TestLoadServeConfigErrors(t *testing.T) {
 		t.Error("配置 hour=-1 应报错")
 	}
 }
+
+// TestLoadServeConfigWebSection 验收：阅读页配置合并——
+// 默认关闭（零影响升级）、配置启用、`-web-addr` 显式优先、口令文件默认路径、非法地址快速失败。
+func TestLoadServeConfigWebSection(t *testing.T) {
+	// 默认：关闭；地址与口令文件取默认值。
+	sf, fs := newServeFlagSetForTest(t)
+	cfg, err := loadServeConfig(sf, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.webEnabled {
+		t.Error("阅读页默认应关闭（未配置时与旧版行为一致）")
+	}
+	if cfg.webAddr != defaultWebAddr {
+		t.Errorf("默认地址 = %q, want %q", cfg.webAddr, defaultWebAddr)
+	}
+	if cfg.webTokenFile != defaultTokenFileName {
+		t.Errorf("默认口令文件 = %q, want %q", cfg.webTokenFile, defaultTokenFileName)
+	}
+
+	// 配置启用 + 自定义地址与口令文件。
+	p := writeConfigFile(t, `{"web":{"enabled":true,"addr":"127.0.0.1:9000","token_file":"/tmp/tok"}}`)
+	sf, fs = newServeFlagSetForTest(t, "-config", p)
+	cfg, err = loadServeConfig(sf, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.webEnabled || cfg.webAddr != "127.0.0.1:9000" || cfg.webTokenFile != "/tmp/tok" {
+		t.Errorf("配置未生效：enabled=%v addr=%q tokenFile=%q", cfg.webEnabled, cfg.webAddr, cfg.webTokenFile)
+	}
+
+	// 配置只给 enabled：地址用默认，口令文件落在配置文件同目录。
+	p = writeConfigFile(t, `{"web":{"enabled":true}}`)
+	sf, fs = newServeFlagSetForTest(t, "-config", p)
+	cfg, err = loadServeConfig(sf, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.webEnabled || cfg.webAddr != defaultWebAddr {
+		t.Errorf("仅 enabled 时应用默认地址，实际 %v/%q", cfg.webEnabled, cfg.webAddr)
+	}
+	if want := filepath.Join(filepath.Dir(p), defaultTokenFileName); cfg.webTokenFile != want {
+		t.Errorf("口令文件 = %q, want %q（配置文件同目录）", cfg.webTokenFile, want)
+	}
+
+	// -web-addr 显式优先，且即使配置 enabled=false 也启用。
+	p = writeConfigFile(t, `{"web":{"enabled":false,"addr":"127.0.0.1:9001"}}`)
+	sf, fs = newServeFlagSetForTest(t, "-config", p, "-web-addr", "127.0.0.1:9002")
+	cfg, err = loadServeConfig(sf, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.webEnabled || cfg.webAddr != "127.0.0.1:9002" {
+		t.Errorf("flag 应优先并启用：enabled=%v addr=%q", cfg.webEnabled, cfg.webAddr)
+	}
+
+	// -web-addr "" 显式禁用。
+	sf, fs = newServeFlagSetForTest(t, "-web-addr", "")
+	cfg, err = loadServeConfig(sf, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.webEnabled {
+		t.Error("-web-addr \"\" 应禁用阅读页")
+	}
+
+	// 启用时地址非法 → 快速失败。
+	p = writeConfigFile(t, `{"web":{"enabled":true,"addr":"not-an-addr"}}`)
+	sf, fs = newServeFlagSetForTest(t, "-config", p)
+	if _, err := loadServeConfig(sf, fs); err == nil {
+		t.Error("非法 web.addr 应报错")
+	}
+}
+
+// TestLoadWebTokenFile 验收：web-token 子命令的口令文件路径解析。
+func TestLoadWebTokenFile(t *testing.T) {
+	// 无 -config → 工作目录下的默认文件名。
+	got, err := loadWebTokenFile("")
+	if err != nil || got != defaultTokenFileName {
+		t.Errorf("loadWebTokenFile(\"\") = %q, %v；want %q", got, err, defaultTokenFileName)
+	}
+
+	// 配置显式 token_file。
+	p := writeConfigFile(t, `{"web":{"token_file":"/opt/zam/web-token"}}`)
+	got, err = loadWebTokenFile(p)
+	if err != nil || got != "/opt/zam/web-token" {
+		t.Errorf("显式 token_file 解析 = %q, %v", got, err)
+	}
+
+	// 配置未给 token_file → 配置同目录默认名。
+	p2 := writeConfigFile(t, `{"allow_ips":["127.0.0.1"]}`)
+	got, err = loadWebTokenFile(p2)
+	if want := filepath.Join(filepath.Dir(p2), defaultTokenFileName); err != nil || got != want {
+		t.Errorf("回落路径 = %q, %v；want %q", got, err, want)
+	}
+
+	// 配置文件不存在 → 报错（子命令不静默用默认路径）。
+	if _, err := loadWebTokenFile(filepath.Join(t.TempDir(), "nope.json")); err == nil {
+		t.Error("配置文件不存在应报错")
+	}
+}

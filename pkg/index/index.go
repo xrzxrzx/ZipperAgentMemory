@@ -220,6 +220,19 @@ func (m Mode) String() string {
 	return "and"
 }
 
+// ParseMode 解析模式文本（大小写不敏感）：空串与 "and" 等价（默认全部命中），
+// "or" 为任一命中，其余取值返回错误——不静默回退，避免调用方以为语义已生效。
+func ParseMode(s string) (Mode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "and":
+		return ModeAND, nil
+	case "or":
+		return ModeOR, nil
+	default:
+		return ModeAND, fmt.Errorf("invalid mode %q (want \"and\" or \"or\")", s)
+	}
+}
+
 // Search 全文检索 query，返回最多 limit 条命中（默认 20），多词元语义为 AND。
 // 等价于 SearchMode(query, limit, ModeAND)，保留为兼容入口。
 func (ix *Index) Search(query string, limit int) ([]Result, error) {

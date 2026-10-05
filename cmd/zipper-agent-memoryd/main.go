@@ -45,6 +45,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -56,6 +57,7 @@ import (
 	"zipper-agent-memory/pkg/mcp"
 	"zipper-agent-memory/pkg/memory"
 	"zipper-agent-memory/pkg/watch"
+	"zipper-agent-memory/pkg/web"
 )
 
 // version 是守护进程版本号，对应 docs/design.md 的阶段交付规划。
@@ -85,6 +87,8 @@ func main() {
 		err = cmdGitInit(rest)
 	case "search":
 		err = cmdSearch(rest)
+	case "web-token":
+		err = cmdWebToken(rest)
 	case "version", "-version", "--version":
 		fmt.Printf("zipper-agent-memoryd %s\n", version)
 		return
@@ -188,6 +192,7 @@ type serveFlags struct {
 	gitAutoHour int
 	allowIPs    string
 	config      string
+	webAddr     string
 }
 
 // registerServeFlags 注册 serve 专属 flag 并返回取值容器。独立成函数供测试
@@ -199,7 +204,8 @@ func registerServeFlags(fs *flag.FlagSet) *serveFlags {
 	fs.BoolVar(&f.gitAuto, "git-autocommit", true, "git autocommit：每日定时对 memory/ 仓库 git add -A && commit 一次（默认开启，design 决策 3；可随时用 git-commit 子命令主动提交；仓库未初始化时自动 git init 并设置本地 user.name/email，不碰全局配置；显式给出时优先于 -config 配置文件的 autocommit.enabled）")
 	fs.IntVar(&f.gitAutoHour, "git-autocommit-hour", 0, "每日定时提交的小时 0-23（默认 0 点；显式给出时优先于 -config 配置文件的 autocommit.hour）")
 	fs.StringVar(&f.allowIPs, "allow-ips", "", "MCP HTTP 访问 IP 白名单（逗号分隔，如 1.2.3.4,5.6.7.8；空=不限制，design 决策 6；显式给出时优先于 -config 配置文件的 allow_ips）")
-	fs.StringVar(&f.config, "config", "", "JSON 配置文件路径（可选；含 autocommit.enabled/hour 与 allow_ips，flag 显式给出时优先；缺省字段用默认值）")
+	fs.StringVar(&f.config, "config", "", "JSON 配置文件路径（可选；含 autocommit.enabled/hour、allow_ips 与 web.enabled/addr/token_file，flag 显式给出时优先；缺省字段用默认值）")
+	fs.StringVar(&f.webAddr, "web-addr", "", "只读阅读页监听地址（如 127.0.0.1:8932）；显式给出即启用（空串=禁用），未给出时由 -config 的 web.enabled 决定。口令永远从文件读，不走 flag（避免 ps 泄露）")
 	return f
 }
 
@@ -314,6 +320,28 @@ func cmdServe(args []string) error {
 	go func() { httpErr <- httpSrv.ListenAndServe() }()
 	logger.Printf("MCP server listening on http://%s/mcp (root=%s, debounce=%s)", sf.addr, rootAbs, sf.debounce)
 
+	// 只读 Web 阅读页（需求-001）：与 MCP 同进程、独立监听地址，共享同一
+	// store/index 实例。口令只从文件读取（flag 会出现在 ps 输出里，故不支持）；
+	// 口令文件缺失/过短/权限过宽一律启动失败（快速失败，不留半配置的对外服务）。
+	webErr := make(chan error, 1)
+	var webHTTP *http.Server
+	if cfg.webEnabled {
+		token, err := web.LoadToken(cfg.webTokenFile)
+		if err != nil {
+			return fmt.Errorf("web: %w", err)
+		}
+		webSrv, err := web.New(web.Options{Store: store, Index: ix, Token: token, Logf: logger.Printf})
+		if err != nil {
+			return fmt.Errorf("web: %w", err)
+		}
+		if host, _, err := net.SplitHostPort(cfg.webAddr); err == nil && host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			logger.Printf("web: warning: listening on non-loopback %s (建议仅监听 127.0.0.1 并由 nginx 反代)", cfg.webAddr)
+		}
+		webHTTP = &http.Server{Addr: cfg.webAddr, Handler: webSrv.Handler()}
+		go func() { webErr <- webHTTP.ListenAndServe() }()
+		logger.Printf("web reading UI listening on http://%s/memory/ (token: %d chars from %s)", cfg.webAddr, len(token), cfg.webTokenFile)
+	}
+
 	watchErr := make(chan error, 1)
 	go func() { watchErr <- w.Start(ctx) }()
 
@@ -326,6 +354,10 @@ func cmdServe(args []string) error {
 	case err := <-httpErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			runErr = fmt.Errorf("http server: %w", err)
+		}
+	case err := <-webErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			runErr = fmt.Errorf("web server: %w", err)
 		}
 	case err := <-watchErr:
 		runErr = err
@@ -343,6 +375,11 @@ func cmdServe(args []string) error {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Printf("http shutdown: %v", err)
+	}
+	if webHTTP != nil {
+		if err := webHTTP.Shutdown(shutdownCtx); err != nil {
+			logger.Printf("web http shutdown: %v", err)
+		}
 	}
 	if ac != nil && !acDone {
 		<-acErr // 等待每日提交 goroutine 优雅退出（ctx 取消后立即返回）
@@ -499,20 +536,74 @@ func cmdSearch(args []string) error {
 	return nil
 }
 
+// cmdWebToken 读取或生成阅读页口令。
+//
+// 口令只从文件读写，**不接受命令行传入口令值**——命令行参数会出现在 `ps`
+// 输出与 shell 历史里。缺省行为是把当前口令打到 stdout（供人工取用，
+// 例如 ssh 到服务器后 `| Set-Clipboard`）；-init 生成新口令并写入文件
+// （0600 原子写），屏幕只打印长度，用于首次生成与泄露后轮换。
+func cmdWebToken(args []string) error {
+	fs := flag.NewFlagSet("web-token", flag.ExitOnError)
+	configPath := fs.String("config", "", "JSON 配置文件路径（用于解析 web.token_file）")
+	tokenFile := fs.String("token-file", "", "口令文件路径（优先于 -config）")
+	initFlag := fs.Bool("init", false, "生成新口令并写入文件（权限 0600）")
+	force := fs.Bool("force", false, "与 -init 同用时允许覆盖已存在的口令文件（轮换）")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: zipper-agent-memoryd web-token [-config path] [-token-file path] [-init [-force]]")
+	}
+
+	path := *tokenFile
+	if path == "" {
+		p, err := loadWebTokenFile(*configPath)
+		if err != nil {
+			return err
+		}
+		path = p
+	}
+
+	if !*initFlag {
+		token, err := web.LoadToken(path)
+		if err != nil {
+			return err
+		}
+		fmt.Println(token)
+		return nil
+	}
+
+	if _, err := os.Stat(path); err == nil && !*force {
+		return fmt.Errorf("token file %s already exists (use -force to rotate)", path)
+	}
+	token, err := web.GenerateToken()
+	if err != nil {
+		return err
+	}
+	if err := web.WriteToken(path, token); err != nil {
+		return err
+	}
+	// 只打印长度：口令本身不进终端回滚缓冲、不进任何日志。
+	fmt.Printf("web-token: wrote %d chars to %s\n", len(token), path)
+	return nil
+}
+
 func usage() {
-	fmt.Fprintf(os.Stderr, `zipper-agent-memoryd - ZipperAgentMemory 记忆守护进程（阶段 2/3/4 + 决策 3/6）
+	fmt.Fprintf(os.Stderr, `zipper-agent-memoryd - ZipperAgentMemory 记忆守护进程（阶段 2/3/4 + 决策 3/6 + 阅读页）
 
 用法：
   zipper-agent-memoryd <command> [flags] [args]
 
 命令：
   serve          常驻运行：全量重建索引 + fsnotify 监听 + MCP streamable HTTP
-                （默认 http://127.0.0.1:8931/mcp，Ctrl+C 退出）
+                （默认 http://127.0.0.1:8931/mcp，Ctrl+C 退出）；配置启用时
+                另起只读阅读页（默认 http://127.0.0.1:8932/memory/）
   git-commit     立即执行一次 git 提交（主动触发入口，无变更时输出跳过）
   stdio          MCP stdio 模式：按需拉起，供纯 stdio 客户端（客户端断开即退出）
   rebuild-index  全量重建索引后退出
   git-init       初始化 memory/ 为 git 仓库并补全本地 user.name/email（幂等）
   search         全文检索并输出 路径+命中片段
+  web-token      打印阅读页口令；-init 生成新口令（-force 覆盖，用于轮换）
   version        输出版本号
 
 通用 flag：
@@ -528,19 +619,32 @@ serve 专属 flag：
   -git-autocommit-hour <h>  每日定时提交小时 0-23（默认 0；显式给出时优先于配置）
   -allow-ips <list>   MCP HTTP 访问 IP 白名单（逗号分隔，如 1.2.3.4,5.6.7.8；
                       空=不限制；显式给出时优先于配置）
-  -config <path>      JSON 配置文件（可选）：{"autocommit":{"enabled":true,
-                      "hour":0},"allow_ips":["127.0.0.1","120.228.126.4"]}；
+  -web-addr <host:port>  只读阅读页监听地址（如 127.0.0.1:8932）；显式给出即
+                      启用（空串=禁用）。口令只从文件读，不走 flag
+  -config <path>      JSON 配置文件（可选）：
+                      {"autocommit":{"enabled":true,"hour":0},
+                       "allow_ips":["127.0.0.1","120.228.126.4"],
+                       "web":{"enabled":true,"addr":"127.0.0.1:8932",
+                              "token_file":"/opt/zipper-agent-memory/web-token"}}；
                       缺省字段用默认值，flag 显式给出时优先
+
+web-token 专属 flag：
+  -config <path>      解析配置里的 web.token_file
+  -token-file <path>  直接指定口令文件（优先于 -config）
+  -init               生成新口令写入文件（0600，只打印长度不打印口令）
+  -force              与 -init 同用时允许覆盖已有口令文件（轮换）
 
 示例：
   zipper-agent-memoryd serve -root memory
   zipper-agent-memoryd serve -root memory -addr 0.0.0.0:8931 -allow-ips "1.2.3.4,5.6.7.8"
   zipper-agent-memoryd serve -root memory -config /opt/zipper-agent-memory/config.json
-  zipper-agent-memoryd serve -root memory -git-autocommit=false
+  zipper-agent-memoryd serve -root memory -web-addr 127.0.0.1:8932
   zipper-agent-memoryd git-commit -root memory
   zipper-agent-memoryd stdio -root memory
   zipper-agent-memoryd rebuild-index -root memory
   zipper-agent-memoryd git-init -root memory
   zipper-agent-memoryd search -root memory "Go 语言"
+  zipper-agent-memoryd web-token -config /opt/zipper-agent-memory/config.json -init
+  zipper-agent-memoryd web-token -config /opt/zipper-agent-memory/config.json
 `)
 }

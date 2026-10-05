@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆库</title>
+<link rel="stylesheet" href="/memory/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <button id="home" class="ghost" title="回到根目录">记忆库</button>
+  <form id="search-form">
+    <input id="q" type="search" placeholder="搜索关键词（空格分隔多个）" autocomplete="off">
+    <select id="mode" title="多关键词匹配方式">
+      <option value="and">全部命中 AND</option>
+      <option value="or">任一命中 OR</option>
+    </select>
+    <button type="submit">搜索</button>
+  </form>
+  <button id="logout" class="ghost">退出</button>
+</header>
+<main class="layout">
+  <aside id="sidebar" class="sidebar"></aside>
+  <section id="content" class="content">
+    <p class="hint">在左侧展开目录选择文件，或在上方搜索。</p>
+  </section>
+</main>
+<footer class="statusbar"><span id="status">加载中…</span></footer>
+<script src="/memory/static/app.js"></script>
+</body>
+</html>

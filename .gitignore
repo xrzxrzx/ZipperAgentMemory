@@ -29,3 +29,8 @@ memory/**/*.db
 
 # 记忆库索引（derived state，可随时 rebuild；放 memory/ 同级，不入 git）
 .zipper-agent-memory.index.sqlite*
+
+# 【安全】阅读页口令文件（web-token）：只存在于服务器/本机，绝不入库。
+# 默认位置：-config 配置文件同目录（无 -config 时为工作目录）。
+web-token
+.web-token-*

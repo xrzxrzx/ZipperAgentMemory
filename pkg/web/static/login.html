@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆库 · 登录</title>
+<link rel="stylesheet" href="/memory/static/style.css">
+</head>
+<body class="login-body">
+<main class="login-card">
+  <h1>记忆库</h1>
+  <p class="hint">输入访问口令（长期有效，只需输一次）</p>
+  <form id="login-form">
+    <input id="token" type="password" autocomplete="current-password" placeholder="访问口令" required autofocus>
+    <button type="submit" id="submit">进入</button>
+  </form>
+  <p id="msg" class="error" role="alert"></p>
+</main>
+<script>
+'use strict';
+// 登录脚本内联在页面里：避免多一个未声明的静态文件，也少一次请求。
+document.getElementById('login-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const msg = document.getElementById('msg');
+  const button = document.getElementById('submit');
+  msg.textContent = '';
+  button.disabled = true;
+  try {
+    const res = await fetch('/memory/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ token: document.getElementById('token').value }),
+    });
+    if (res.ok) {
+      window.location.replace('/memory/');
+      return;
+    }
+    if (res.status === 429) {
+      msg.textContent = '尝试次数过多，请稍后再试。';
+    } else if (res.status === 401) {
+      msg.textContent = '口令不正确。';
+    } else {
+      msg.textContent = '登录失败（HTTP ' + res.status + '）。';
+    }
+  } catch (err) {
+    msg.textContent = '网络错误：' + err.message;
+  } finally {
+    button.disabled = false;
+    document.getElementById('token').select();
+  }
+});
+</script>
+</body>
+</html>

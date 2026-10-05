@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/yuin/goldmark v1.8.6
 	modernc.org/sqlite v1.57.0
 )
 

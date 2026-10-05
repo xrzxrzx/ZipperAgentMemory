@@ -270,7 +270,7 @@ func (s *Server) handleSearch(_ context.Context, req *sdk.CallToolRequest) (*sdk
 	if strings.TrimSpace(args.Query) == "" {
 		return errResult(errors.New("memory_search: missing required argument \"query\"")), nil
 	}
-	mode, err := parseSearchMode(args.Mode)
+	mode, err := index.ParseMode(args.Mode)
 	if err != nil {
 		return errResult(fmt.Errorf("memory_search: %w", err)), nil
 	}
@@ -289,19 +289,8 @@ func (s *Server) handleSearch(_ context.Context, req *sdk.CallToolRequest) (*sdk
 	return textResult(b.String()), nil
 }
 
-// parseSearchMode 解析 memory_search 的 mode 参数（大小写不敏感）：
-// 缺省/空串与 "and" 等价（默认全部命中），"or" 为任一命中，其余取值报错
-// （不静默回退，避免调用方以为生效了实际没有）。
-func parseSearchMode(s string) (index.Mode, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "and":
-		return index.ModeAND, nil
-	case "or":
-		return index.ModeOR, nil
-	default:
-		return index.ModeAND, fmt.Errorf("invalid mode %q (want \"and\" or \"or\")", s)
-	}
-}
+// parseSearchMode 已上移为 index.ParseMode（模式文本解析的唯一真源），
+// Web 层与 MCP 层共用同一实现，避免两处语义漂移。
 
 func (s *Server) handleList(_ context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
 	var args struct {
