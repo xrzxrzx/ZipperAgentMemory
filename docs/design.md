@@ -1,7 +1,7 @@
 # ZipperAgentMemory 设计文档 v1.0（已批准）
 
 > 状态：`已批准`（2026-08-21，用户全批准）— 本文档是项目的唯一权威设计来源，变更须先改本文档并重新获批。
-> 批准人：用户　撰写：协调者　版本历史：v0.1 草案 → v1.0 批准（含调研增量）
+> 批准人：用户　撰写：协调者　版本历史：v0.1 草案 → v1.0 批准（含调研增量）→ 2026-10-05 追加 §11「记忆阅读页」与 §10 决策 8（已获用户批准）
 
 ## 1. 需求概述
 
@@ -216,5 +216,97 @@ memory/                      ← 整个目录即 git 仓库
 | 5 | ~~设计整体批准~~ | ✅ v1.0 生效 |
 | 6 | **公网部署（2026-08-22）** | ✅ 8931 端口对公网开放（用户已在云安全组放行），**IP 白名单**：`127.0.0.1`（SSH 隧道）+ `120.228.126.4`（家庭直连，动态 IP 变化时改配置文件重启）；支持 JSON 配置文件（`-config`）与 `-allow-ips` flag 双通道 |
 | 7 | **首次数据导入（2026-08-22）** | ✅ 密码薄.xlsx（忽略图片）转 CSV 存 `structured/`；服务器地址/root 密码/数据库密码记入记忆库 |
+| 8 | **记忆阅读页（2026-10-05）** | ✅ 浏览器只读入口走**路径式** `https://zipper.net.cn/memory/`（复用现有证书，不新建子域、不签新证书）；访问需**长期有效口令**（存服务器文件 `web-token`，0600）；**全库可读**（含 `structured/` 密码资料，口令为唯一防线，**风险经用户知情接受**）；主域其余路径一律 404；阅读页**只读**，无任何写接口。详见 §11 |
 
-> 本设计文档 v1.0 经用户全批准；2026-08-22 补充决策 3/6/7 已获用户确认。后续任何偏离须先更新本文档并重新获批（AGENTS.d/workflow.md）。
+> 本设计文档 v1.0 经用户全批准；2026-08-22 补充决策 3/6/7 已获用户确认；2026-10-05 追加 §11 与决策 8 已获用户确认。后续任何偏离须先更新本文档并重新获批（AGENTS.d/workflow.md）。
+
+## 11. 记忆阅读页（只读 Web UI，2026-10-05 追加）
+
+> 需求与验收口径：`docs/features/需求-001-记忆阅读页/`（需求 REQ-01…08、技术方案、实施方案）
+
+### 11.1 目标与边界
+
+| 项 | 内容 |
+|---|---|
+| 目标 | 让所有者用**浏览器**随时阅读与检索记忆库（外出、临时设备场景） |
+| 入口 | `https://zipper.net.cn/memory/`（复用现有 `zipper.net.cn` 证书，不新建子域） |
+| 只读 | 仅 GET/登录相关接口；**不提供任何写接口**，写仍走 MCP / CLI |
+| 覆盖范围 | **全库可读**（含 `structured/` 密码资料）——口令为唯一防线，**风险经用户知情接受**（决策 8） |
+| 暴露面 | 主域除 `/memory/` 外一律 404（含首页，保持下线）；`:80` 的 `/memory/` 301 跳 HTTPS |
+
+### 11.2 架构
+
+```
+浏览器 ──https://zipper.net.cn/memory/──► nginx :443（现有证书）
+                                            └─ location /memory/ → 127.0.0.1:8932
+
+zipper-agent-memoryd（单进程）
+  ├─ :8931  /mcp          MCP（IP 白名单，契约见 §6，本次仅新增 memory_search 的 mode 参数）
+  └─ :8932  /memory/*     只读阅读页（口令认证）──► 同一 memory.Store + index.Index 实例
+```
+
+- **同进程双监听**：复用同一 store/index，避免第二份索引连接与额外内存（资源红线见 §3.3）；
+- Web handler 全部包 panic 恢复，崩溃不影响 MCP 路由；
+- 默认 `web.enabled=false`：未配置时行为与旧版完全一致（零影响升级）。
+
+### 11.3 认证
+
+| 项 | 设计 |
+|---|---|
+| 口令 | 32 字节随机数的 base64url（43 字符），存**独立文件**（默认 `<config 同目录>/web-token`，权限 **0600**，内容一行）；**永不经命令行参数传递**（`ps` 可见） |
+| 生成/轮换 | `zipper-agent-memoryd web-token -config <path> -init [-force]`：原子写、自动 0600、屏幕只打印长度不回显口令 |
+| 提交方式 | ① 页面登录：`POST /memory/api/login` → 下发持久 Cookie（HttpOnly + SameSite=Lax，HTTPS 下置 Secure，Max-Age 10 年 = 「不过期」）；② 脚本：`Authorization: Bearer`。<br>**为什么必须用 Cookie**：浏览器顶层导航不发送 Authorization 头，纯 Bearer 方案一刷新即掉登录 |
+| 校验 | `crypto/subtle` 常量时间比较；失败按来源 IP 限流（10 次/分钟 → 429，表规模上限 1024） |
+| 日志 | 只记方法/路径/状态/来源/耗时；**不记 query 与 Cookie**（避免检索词与口令进日志） |
+
+### 11.4 路由（全部在 `/memory/` 前缀下）
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| GET | `/memory/login` | 公开 | 登录页（纯静态，不含库内容） |
+| POST | `/memory/api/login` | 公开（限流） | 口令换 Cookie |
+| POST | `/memory/api/logout` | 需要 | 清 Cookie |
+| GET | `/memory/api/status` | 需要 | 文件数 / 总字节 / 最近修改 |
+| GET | `/memory/api/tree?path=` | 需要 | 目录项（不递归，惰性加载） |
+| GET | `/memory/api/file?path=` | 需要 | 正文：`markdown`（渲染）/ `text`（原文）/ `binary`·`large`（仅提示下载）；内联展示上限 1 MiB |
+| GET | `/memory/api/raw?path=` | 需要 | 原始字节下载（`Content-Disposition` 按 RFC 5987 编码中文文件名） |
+| GET | `/memory/api/search?q=&mode=&limit=` | 需要 | 全文检索；`mode=and`（默认，全部命中）/`or`（任一命中）；`limit` 上限 100 |
+| GET | `/memory/static/*` | 需要 | 内嵌静态资源（`go:embed`，无 CDN 依赖） |
+
+未授权响应：`/memory/api/*` → 401；浏览器导航（Accept 含 `text/html`）→ 302 跳登录页；路径穿越 → 400（Linux 绝对路径亦 400，Windows 下为 404，两者都不返回根外内容）。
+
+### 11.5 安全边界
+
+1. 所有 `path` 经 `memory.Store` 路径沙箱校验（§6.2 同一实现），**穿越一律拒绝**；
+2. Markdown 渲染用 goldmark 且**不启用** `html.WithUnsafe()`：库内从外部抓取的资料里若含原始 HTML/脚本，会被省略为 `<!-- raw HTML omitted -->` 而不执行；
+3. 文本类文件由前端以 `textContent` 写入（浏览器负责转义），服务端返回原文，避免二次转义；
+4. 响应带 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`；
+5. **残余风险（用户已知情接受）**：口令即全库（含密码资料）的唯一防线。泄露应对：轮换口令 + 立即修改库内涉及的密码。
+
+### 11.6 配置
+
+```json
+{
+  "allow_ips": ["127.0.0.1", "120.228.125.194"],
+  "autocommit": { "enabled": true, "hour": 0 },
+  "web": {
+    "enabled": true,
+    "addr": "127.0.0.1:8932",
+    "token_file": "/opt/zipper-agent-memory/web-token"
+  }
+}
+```
+
+优先级：`-web-addr` flag（显式给出即启用，空串=禁用）> 配置文件 `web.*` > 默认关闭。
+启用时口令文件缺失/过短/权限过宽（含 group/other 位）→ **启动快速失败**。
+
+### 11.7 对既有实现的变更
+
+| 项 | 变更 |
+|---|---|
+| `memory_search`（MCP） | **行为变更**：多关键词由「整串连续短语」改为「按空白切分的词元 AND/OR」；新增可选参数 `mode`（默认 `and`）。单词查询行为不变 |
+| `search`（CLI） | 同上（默认 AND） |
+| 索引进度 | **无需重建**：FTS5 表结构与单字切分方式未变，仅查询串构造变化 |
+| 新增依赖 | `github.com/yuin/goldmark`（纯 Go、MIT、无 CGO，仅用于渲染） |
+| 资源 | goldmark + 内嵌静态资源约 +1–3MB，仍在 §3.3 的 60MB 红线内 |
+

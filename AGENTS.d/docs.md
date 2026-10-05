@@ -8,8 +8,24 @@
 | `docs/design.md` | **唯一权威设计文档**，变更须重新获批 | 协调者 |
 | `docs/standards/` | 语言编码规范 | 文档 Agent |
 | `docs/research/` | 调研报告（一手来源 + 链接） | 调研 Agent |
+| `docs/features/` | **特性文档体系**（见下方映射） | 协调者 |
 | `docs/memory/` | 项目记忆仓库（见 memory.md） | 全员 |
 | `AGENTS.d/` | 多 Agent 协作约定 | 协调者 |
+
+## 1.1 特性文档映射（`docs/features/`）
+
+| 阶段产出 | 路径 |
+|---|---|
+| S0 调研 | `docs/features/需求-NNN-<标题>/调研.md`（可选，T2 强制） |
+| S1 需求 | `docs/features/需求-NNN-<标题>/需求.md` |
+| S2 技术方案 | `docs/features/需求-NNN-<标题>/技术方案.md` |
+| S3 实施方案 | `docs/features/需求-NNN-<标题>/实施方案.md`（TODO list 为进度唯一真源） |
+| S4 验收 | `docs/features/需求-NNN-<标题>/验收.md` |
+| 跨需求索引 | `docs/features/台账.md`（状态与关联提交的唯一真源） |
+
+- 编号全局递增（`需求-001`…），一份需求一个目录，五份文档**必须同目录**；
+- 除 `design.md`（须重新获批）外，特性文档随对应阶段提交；
+- 各文档**禁止复述进度**，一律写「见 `实施方案.md §2 Tn`」。
 
 ## 2. 编写规范
 

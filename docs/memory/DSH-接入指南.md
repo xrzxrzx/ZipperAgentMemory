@@ -41,6 +41,24 @@ ssh minichat-server 'cd /opt/zipper-agent-memory && ./zipper-agent-memoryd git-c
 ```
 （每日 00:05 自动提交+推送 Gitee；紧急变更可手动执行）
 
+## 查看 Web 阅读页口令
+
+浏览器只读入口：`https://zipper.net.cn/memory/`（设计见 `docs/design.md §11`）。
+口令存在服务器文件里，**只在服务器侧读取，绝不写进记忆库、仓库或聊天记录**：
+
+```powershell
+# 本机 PowerShell：一行取到剪贴板（屏幕不回显完整口令）
+(ssh zipper-server "cat /opt/zipper-agent-memory/web-token").Trim() | Set-Clipboard
+# 只想确认取对了（显示前 4 位 + 长度，完整值仍进剪贴板）
+$t = (ssh zipper-server "cat /opt/zipper-agent-memory/web-token").Trim(); $t | Set-Clipboard; "{0}…（{1} 字符）" -f $t.Substring(0,4), $t.Length
+```
+
+> 上例用本机 SSH 别名 `zipper-server`（旧文档写的 `minichat-server` 是同一台 `8.141.89.50`，按你 ssh config 里的实际别名替换即可）。
+
+- 口令**长期有效**，只需在**首次登录、换设备或清空浏览器 Cookie** 后重新输入；
+- 未授权访问一律 401（接口）或跳登录页（页面导航）；连续失败 10 次/分钟会被限流；
+- 轮换口令与泄露处置见 `docs/部署手册.md §4`「阅读页口令」。
+
 ## 客户端接入（Claude/Codex）
 
 **主方案：SSH 隧道（2026-09-29 起，已配成常驻自启）**
