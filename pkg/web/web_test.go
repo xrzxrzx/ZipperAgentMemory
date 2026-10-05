@@ -67,6 +67,9 @@ func newTestEnv(t *testing.T) *testEnv {
 		"notes/tunnel.md": "# 隧道\n\n只有隧道。\n",
 		"notes/port.md":   "# 端口\n\n只有端口。\n",
 		"notes/plain.txt": "<script>alert('xss')</script>\n",
+		// 隐藏项：用于验证阅读页不暴露点目录/点文件（含 .git/ 这类仓库内部）。
+		".git/config":      "[core]\n\trepositoryformatversion = 0\n",
+		"notes/.secret.md": "隐藏文件不应出现在阅读页。\n",
 	}
 	for rel, content := range files {
 		p := filepath.Join(root, filepath.FromSlash(rel))
@@ -95,6 +98,12 @@ func newTestEnv(t *testing.T) *testEnv {
 // do 发一个请求；token 为空表示不带凭据，accept 为空表示默认头。
 func (e *testEnv) do(t *testing.T, method, path, token, accept string) *http.Response {
 	t.Helper()
+	return e.doH(t, method, path, token, accept, nil)
+}
+
+// doH 与 do 相同，但可附加自定义请求头（用于验证反代来源头的处理）。
+func (e *testEnv) doH(t *testing.T, method, path, token, accept string, extra map[string]string) *http.Response {
+	t.Helper()
 	req, err := http.NewRequest(method, e.http.URL+path, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +113,9 @@ func (e *testEnv) do(t *testing.T, method, path, token, accept string) *http.Res
 	}
 	if accept != "" {
 		req.Header.Set("Accept", accept)
+	}
+	for k, v := range extra {
+		req.Header.Set(k, v)
 	}
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse // 便于断言 302 本身
@@ -659,5 +671,121 @@ func TestResponsesNotCached(t *testing.T) {
 		if cc := res.Header.Get("Cache-Control"); !strings.Contains(cc, "no-store") {
 			t.Errorf("%s 的 Cache-Control = %q，want 含 no-store", p, cc)
 		}
+	}
+}
+
+// TestHiddenPathsNotVisible 验收（2026-10-05 用户决策）：阅读页不暴露点目录与
+// 点文件——目录列表不含它们，直接访问一律 404（含 .git/ 这类仓库内部）。
+func TestHiddenPathsNotVisible(t *testing.T) {
+	env := newTestEnv(t)
+
+	res := env.do(t, http.MethodGet, "/memory/api/tree?path=.", testToken, "application/json")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("根目录列表 = %d，want 200", res.StatusCode)
+	}
+	var tree treeResponse
+	decodeJSON(t, res, &tree)
+	if len(tree.Entries) == 0 {
+		t.Fatal("根目录列表为空，测试夹具异常")
+	}
+	for _, e := range tree.Entries {
+		if strings.HasPrefix(e.Name, ".") {
+			t.Errorf("目录列表泄漏隐藏项 %q", e.Name)
+		}
+	}
+	// notes/ 下的点文件同样不列出。
+	res = env.do(t, http.MethodGet, "/memory/api/tree?path=notes", testToken, "application/json")
+	var sub treeResponse
+	decodeJSON(t, res, &sub)
+	for _, e := range sub.Entries {
+		if strings.HasPrefix(e.Name, ".") {
+			t.Errorf("子目录列表泄漏隐藏项 %q", e.Name)
+		}
+	}
+
+	// 直接访问点路径：读、下载、列目录一律 404。
+	for _, p := range []string{".git%2Fconfig", "notes%2F.secret.md", ".gitignore"} {
+		if res := env.do(t, http.MethodGet, "/memory/api/file?path="+p, testToken, "application/json"); res.StatusCode != http.StatusNotFound {
+			t.Errorf("file?path=%s = %d，want 404", p, res.StatusCode)
+		}
+		if res := env.do(t, http.MethodGet, "/memory/api/raw?path="+p, testToken, "application/json"); res.StatusCode != http.StatusNotFound {
+			t.Errorf("raw?path=%s = %d，want 404", p, res.StatusCode)
+		}
+	}
+	if res := env.do(t, http.MethodGet, "/memory/api/tree?path=.git", testToken, "application/json"); res.StatusCode != http.StatusNotFound {
+		t.Errorf("tree?path=.git = %d，want 404", res.StatusCode)
+	}
+
+	// 对照：正常文件与根目录未受影响（证明不是"一律拒绝"）。
+	if res := env.do(t, http.MethodGet, "/memory/api/file?path=notes%2Fboth.md", testToken, "application/json"); res.StatusCode != http.StatusOK {
+		t.Errorf("正常文件被误伤：%d", res.StatusCode)
+	}
+}
+
+// TestClientIPTrustsProxyHeadersOnlyFromLoopback 验收（P2-4 修复）：仅当
+// RemoteAddr 是回环地址（= 同机 nginx 反代）时才采信来源头；非回环来源伪造
+// X-Real-IP / X-Forwarded-For 一律无效。
+func TestClientIPTrustsProxyHeadersOnlyFromLoopback(t *testing.T) {
+	mk := func(remote string, hdr map[string]string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/memory/api/status", nil)
+		r.RemoteAddr = remote
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		return r
+	}
+	cases := []struct {
+		name string
+		req  *http.Request
+		want string
+	}{
+		{"回环 + X-Real-IP → 采信", mk("127.0.0.1:5555", map[string]string{"X-Real-IP": "203.0.113.7"}), "203.0.113.7"},
+		{"IPv6 回环 + X-Real-IP → 采信", mk("[::1]:5555", map[string]string{"X-Real-IP": "203.0.113.8"}), "203.0.113.8"},
+		{"回环 + 仅 XFF → 取最后一段（nginx 追加的真实来源）", mk("127.0.0.1:5555", map[string]string{"X-Forwarded-For": "1.2.3.4, 203.0.113.9"}), "203.0.113.9"},
+		{"回环 + X-Real-IP 非法 → 回落 XFF 末段", mk("127.0.0.1:5555", map[string]string{"X-Real-IP": "not-an-ip", "X-Forwarded-For": "1.2.3.4, 203.0.113.10"}), "203.0.113.10"},
+		{"回环 + 头全非法 → 回落回环地址", mk("127.0.0.1:5555", map[string]string{"X-Real-IP": "x", "X-Forwarded-For": "y"}), "127.0.0.1"},
+		{"非回环 → 忽略伪造的来源头", mk("198.51.100.5:6666", map[string]string{"X-Real-IP": "203.0.113.7", "X-Forwarded-For": "1.2.3.4"}), "198.51.100.5"},
+	}
+	for _, c := range cases {
+		if got := clientIP(c.req); got != c.want {
+			t.Errorf("%s：clientIP = %q，want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRateLimitKeyedByRealClientIP 验收（P2-4 修复的效果）：反代场景下限流按
+// **真实来源**分桶，而非全局单桶——否则任意可达者连发错误口令即可让所有者
+// 60 秒内无法新登录。
+func TestRateLimitKeyedByRealClientIP(t *testing.T) {
+	env := newTestEnv(t)
+	login := func(realIP string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, env.http.URL+"/memory/api/login",
+			strings.NewReader(`{"token":"wrong-wrong-wrong-wrong"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Real-IP", realIP)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		return res.StatusCode
+	}
+
+	code := 0
+	for i := 0; i < failLimit+1; i++ {
+		code = login("203.0.113.1")
+	}
+	if code != http.StatusTooManyRequests {
+		t.Errorf("同一来源连续失败后应 429，实际 %d", code)
+	}
+	// 关键断言：另一来源不受影响（修复前是全局单桶，这里也会 429）。
+	if got := login("203.0.113.2"); got == http.StatusTooManyRequests {
+		t.Error("不同来源不应共享限流桶（反代下必须按真实来源分桶）")
+	} else if got != http.StatusUnauthorized {
+		t.Errorf("另一来源应正常走认证（401），实际 %d", got)
 	}
 }

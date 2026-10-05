@@ -217,12 +217,41 @@ func isHTTPS(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-// clientIP 取远端 IP（去掉端口）。反代场景下 RemoteAddr 是 nginx 地址
-// （127.0.0.1），限流因此按反代地址聚合——这是**有意为之**：
-// 若改用 X-Forwarded-For，伪造该头即可绕过限流。
+// clientIP 取客户端 IP（失败限流按它分桶）。
+//
+// 反代取舍（2026-10-05 用户决策）：本服务只监听回环，线上请求全部经同机 nginx
+// 抵达，此时 RemoteAddr 恒为 127.0.0.1。若直接用它，全互联网来源会被聚合进
+// **同一个限流桶**——任意可达者连发 10 次错误口令即可让所有者 60 秒内无法新登录。
+//
+// 规则：**仅当 RemoteAddr 本身是回环地址时**才采信反代写入的来源头；非回环来源
+// 一律用自己的 RemoteAddr（此时它无法伪造，伪造的 X-Real-IP / X-Forwarded-For
+// 被忽略）。来源头优先级：`X-Real-IP`（nginx 用 `proxy_set_header` 覆写，不可伪造）
+// → `X-Forwarded-For` 的**最后一段**（nginx 用 `$proxy_add_x_forwarded_for` 追加，
+// 最后一段才是本机观测到的真实来源；取最左等于让攻击者随便填）→ 回环地址本身。
 func clientIP(r *http.Request) string {
-	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return h
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	return r.RemoteAddr
+	if !isLoopbackHost(host) {
+		return host
+	}
+	if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(ip) != nil {
+		return ip
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		if last := strings.TrimSpace(parts[len(parts)-1]); net.ParseIP(last) != nil {
+			return last
+		}
+	}
+	return host
+}
+
+// isLoopbackHost 报告主机名是否为回环地址（含 IPv4/IPv6 与 localhost）。
+func isLoopbackHost(host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
 }

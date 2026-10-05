@@ -108,9 +108,13 @@ type treeResponse struct {
 	Entries []treeEntry `json:"entries"`
 }
 
-// handleTree 列出目录（不递归）。
+// handleTree 列出目录（不递归）。**点目录/点文件不列出**（见 hasHiddenComponent）。
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	dir := r.URL.Query().Get("path")
+	if hasHiddenComponent(dir) {
+		s.writeJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
 	entries, err := s.store.List(dir)
 	if err != nil {
 		s.storeError(w, err)
@@ -118,9 +122,30 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := treeResponse{Path: dir, Entries: make([]treeEntry, 0, len(entries))}
 	for _, e := range entries {
+		if strings.HasPrefix(e.Name, ".") {
+			continue // 隐藏项不暴露（含 .git/ 等仓库内部）
+		}
 		resp.Entries = append(resp.Entries, treeEntry{Name: e.Name, IsDir: e.IsDir})
 	}
 	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// hasHiddenComponent 报告 rel 是否含以 "." 开头的路径分量（"." 与 ".." 除外，
+// 前者表示根目录、后者由路径沙箱负责拒绝）。
+//
+// 用途：阅读页对点目录/点文件一律不可见（浏览、读取、下载都拒绝），避免把
+// `.git/` 之类仓库内部内容暴露出去；检索侧天然不受影响——索引本就不收录
+// 隐藏文件（pkg/index ShouldIndex）。
+func hasHiddenComponent(rel string) bool {
+	for _, part := range strings.FieldsFunc(rel, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == "." || part == ".." {
+			continue
+		}
+		if strings.HasPrefix(part, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 // fileResponse 是 /memory/api/file 的响应体。
@@ -139,6 +164,10 @@ type fileResponse struct {
 // handleFile 读取单个文件并按类型给出展示内容。
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
+	if hasHiddenComponent(rel) {
+		s.writeJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err := validateRelPath(rel); err != nil {
 		s.writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -182,6 +211,10 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 // handleRaw 原样输出文件字节，供下载（内容与库中文件逐字节一致）。
 func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
+	if hasHiddenComponent(rel) {
+		s.writeJSONError(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err := validateRelPath(rel); err != nil {
 		s.writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
