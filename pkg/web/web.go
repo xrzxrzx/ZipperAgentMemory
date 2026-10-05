@@ -91,7 +91,7 @@ func (s *Server) Handler() http.Handler {
 // 其余请求返回 401（不泄露任何库内容）。
 func (s *Server) protected(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.auth.Valid(s.auth.Credential(r)) {
+		if s.auth.Authenticate(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -122,23 +122,42 @@ func (rec *statusRecorder) WriteHeader(code int) {
 }
 
 // logRequests 记录访问日志：只记方法、路径、状态、来源与耗时——
-// **不记 query 与 Cookie**，避免检索词与口令进入日志。
+// **不记 query 与 Cookie**，避免检索词与口令进入日志；路径先经
+// [sanitizeLogField] 消毒，防止 `%0a` 之类的控制字符伪造日志行（log forging）。
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		s.logf("web: %s %s %d %s %s", r.Method, r.URL.Path, rec.status, clientIP(r),
+		s.logf("web: %s %s %d %s %s", r.Method, sanitizeLogField(r.URL.Path), rec.status, clientIP(r),
 			time.Since(start).Round(time.Millisecond))
 	})
 }
 
+// sanitizeLogField 把控制字符（含 CR/LF/NUL）替换为 '?'，其余原样保留。
+// 用途：日志字段的注入防护——Go 会把 `%0a` 解码进 URL.Path，未消毒即可伪造
+// 整行日志（例如伪造一条 200 的"已授权访问"记录，污染事后审计）。
+func sanitizeLogField(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
 // secureHeaders 为所有响应补充基础安全头。
+// Cache-Control: no-store —— 响应可能含库原文（正文、下载、检索片段），
+// 一律不进浏览器缓存与中间缓存。
 func (s *Server) secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
 }

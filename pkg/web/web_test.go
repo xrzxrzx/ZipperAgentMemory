@@ -194,18 +194,35 @@ func TestTokenFilePermissionCheck(t *testing.T) {
 func TestAuthenticatorCredentialAndValidity(t *testing.T) {
 	a := NewAuthenticator(testToken)
 
+	// 无凭据 → 拒绝。
+	if a.Authenticate(httptest.NewRequest(http.MethodGet, "/memory/api/status", nil)) {
+		t.Error("无凭据不应通过")
+	}
+	// Bearer 正确。
 	req := httptest.NewRequest(http.MethodGet, "/memory/api/status", nil)
-	if got := a.Credential(req); got != "" {
-		t.Errorf("无凭据时 Credential = %q，want 空", got)
-	}
 	req.Header.Set("Authorization", "Bearer "+testToken)
-	if got := a.Credential(req); got != testToken {
-		t.Errorf("Bearer 提取 = %q", got)
+	if !a.Authenticate(req) {
+		t.Error("Bearer 正确应通过")
 	}
+	// Cookie 正确。
 	req2 := httptest.NewRequest(http.MethodGet, "/memory/api/status", nil)
 	req2.AddCookie(&http.Cookie{Name: CookieName, Value: testToken})
-	if got := a.Credential(req2); got != testToken {
-		t.Errorf("Cookie 提取 = %q", got)
+	if !a.Authenticate(req2) {
+		t.Error("Cookie 正确应通过")
+	}
+	// Bearer 已失效 + Cookie 有效 → 仍应通过（客户端残留的失效 Bearer 不得顶掉会话）。
+	req3 := httptest.NewRequest(http.MethodGet, "/memory/api/status", nil)
+	req3.Header.Set("Authorization", "Bearer stale-token-stale-token-stale")
+	req3.AddCookie(&http.Cookie{Name: CookieName, Value: testToken})
+	if !a.Authenticate(req3) {
+		t.Error("Bearer 失效时不应顶掉有效 Cookie")
+	}
+	// Bearer 与 Cookie 都无效 → 拒绝。
+	req4 := httptest.NewRequest(http.MethodGet, "/memory/api/status", nil)
+	req4.Header.Set("Authorization", "Bearer stale-token-stale-token-stale")
+	req4.AddCookie(&http.Cookie{Name: CookieName, Value: "stale-cookie-stale-cookie-stale"})
+	if a.Authenticate(req4) {
+		t.Error("两路凭据都失效不应通过")
 	}
 
 	if !a.Valid(testToken) {
@@ -558,5 +575,89 @@ func TestIndexPageShell(t *testing.T) {
 	}
 	if res := env.do(t, http.MethodGet, "/memory/unknown", testToken, "text/html"); res.StatusCode != http.StatusNotFound {
 		t.Errorf("/memory/unknown = %d，want 404", res.StatusCode)
+	}
+}
+
+// TestLoginPageSelfContained 验收（独立验证 P2-1 修复）：公开登录页必须自带样式，
+// **不得外链** `/memory/static/*`——静态资源需认证（design.md §11.4），
+// 浏览器取样式表时发 `Accept: text/css`，会被 401 拦掉，导致登录页无样式裸奔。
+func TestLoginPageSelfContained(t *testing.T) {
+	env := newTestEnv(t)
+	res := env.do(t, http.MethodGet, "/memory/login", "", "text/html")
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(body)
+	// 精确判定「外链」：注释里提到该路径属文档说明，不算引用。
+	for _, ref := range []string{`<link`, `href="/memory/static/`, `src="/memory/static/`} {
+		if strings.Contains(page, ref) {
+			t.Errorf("登录页不应外链需认证的静态资源（命中 %q）", ref)
+		}
+	}
+	if !strings.Contains(page, "<style>") {
+		t.Error("登录页应内联样式")
+	}
+	// 反向确认：真实浏览器取样式表的 Accept 头确实拿不到静态资源（设计如此）。
+	if res := env.do(t, http.MethodGet, "/memory/static/style.css", "", "text/css,*/*;q=0.1"); res.StatusCode == http.StatusOK {
+		t.Error("静态资源不应在未授权时可读（若放宽了认证声明，需同步 design.md §11.4）")
+	}
+}
+
+// TestClientInputErrorsAre4xx 验收（独立验证 P2-2 修复）：客户端可构造的输入
+// 错误（目录路径、超长路径、超长分量、含 NUL）一律 4xx，不得下沉成 5xx。
+func TestClientInputErrorsAre4xx(t *testing.T) {
+	env := newTestEnv(t)
+	bad := []string{
+		"notes",                   // 目录
+		".",                       // 根目录
+		"notes/",                  // 目录（尾斜杠）
+		strings.Repeat("a", 300),  // 单级分量超长
+		strings.Repeat("a", 5000), // 整串超长
+		"a%00b",                   // 含 NUL
+		"a%01b",                   // 其它控制字符
+	}
+	for _, p := range bad {
+		res := env.do(t, http.MethodGet, "/memory/api/file?path="+p, testToken, "application/json")
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("file?path=%q = %d，want 400", p, res.StatusCode)
+		}
+		res = env.do(t, http.MethodGet, "/memory/api/raw?path="+p, testToken, "application/json")
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("raw?path=%q = %d，want 400", p, res.StatusCode)
+		}
+	}
+	// 对照：合法路径仍 200（证明上面的拒绝不是"一律拒绝"）。
+	if res := env.do(t, http.MethodGet, "/memory/api/file?path=notes%2Fboth.md", testToken, "application/json"); res.StatusCode != http.StatusOK {
+		t.Errorf("合法路径 = %d，want 200", res.StatusCode)
+	}
+	// 不存在的文件仍 404。
+	if res := env.do(t, http.MethodGet, "/memory/api/file?path=notes%2Fnope.md", testToken, "application/json"); res.StatusCode != http.StatusNotFound {
+		t.Errorf("不存在的文件 = %d，want 404", res.StatusCode)
+	}
+}
+
+// TestLogForgingSanitized 验收（独立验证 P2-3 修复）：URL 中的控制字符不得在
+// 访问日志里伪造出整行记录。
+func TestLogForgingSanitized(t *testing.T) {
+	env := newTestEnv(t)
+	env.do(t, http.MethodGet, "/memory/api/nonexistent%0aINJECTED%20LOG%20LINE", "", "application/json")
+	logs := env.logs.String()
+	if strings.Contains(logs, "\nINJECTED") {
+		t.Errorf("日志被换行注入：%q", logs)
+	}
+	if !strings.Contains(logs, "?INJECTED") {
+		t.Errorf("控制字符应被替换为 '?'，实际：%q", logs)
+	}
+}
+
+// TestResponsesNotCached 验收（独立验证 P3-3 修复）：含库内容的响应不得被缓存。
+func TestResponsesNotCached(t *testing.T) {
+	env := newTestEnv(t)
+	for _, p := range []string{"/memory/api/status", "/memory/api/raw?path=notes%2Fboth.md", "/memory/static/app.js"} {
+		res := env.do(t, http.MethodGet, p, testToken, "application/json")
+		if cc := res.Header.Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+			t.Errorf("%s 的 Cache-Control = %q，want 含 no-store", p, cc)
+		}
 	}
 }

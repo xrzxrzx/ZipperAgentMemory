@@ -289,9 +289,6 @@ func (s *Server) handleSearch(_ context.Context, req *sdk.CallToolRequest) (*sdk
 	return textResult(b.String()), nil
 }
 
-// parseSearchMode 已上移为 index.ParseMode（模式文本解析的唯一真源），
-// Web 层与 MCP 层共用同一实现，避免两处语义漂移。
-
 func (s *Server) handleList(_ context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
 	var args struct {
 		Path string `json:"path"`

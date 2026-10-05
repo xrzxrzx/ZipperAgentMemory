@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,6 +23,12 @@ const maxLoginBody = 4 << 10
 
 // searchLimitMax 是检索返回条数上限。
 const searchLimitMax = 100
+
+// 路径字面形态上限：超限属于客户端输入错误（应 4xx），不是服务端故障。
+const (
+	maxRelPathLen       = 4096 // 整串上限
+	maxPathComponentLen = 255  // 单级分量上限（对齐常见文件系统）
+)
 
 // handleLoginPage 输出公开登录页（纯静态，不含任何库内容）。
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -132,12 +139,18 @@ type fileResponse struct {
 // handleFile 读取单个文件并按类型给出展示内容。
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
-	if strings.TrimSpace(rel) == "" {
-		s.writeJSONError(w, http.StatusBadRequest, "missing path")
+	if err := validateRelPath(rel); err != nil {
+		s.writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	data, err := s.store.Read(rel)
 	if err != nil {
+		if s.pathIsDir(rel) {
+			// 目录：Linux 上 ReadFile 返回 EISDIR、Windows 上是访问被拒——
+			// 统一按客户端错误 400，不污染 5xx。
+			s.writeJSONError(w, http.StatusBadRequest, "path is a directory (use the tree API)")
+			return
+		}
 		s.storeError(w, err)
 		return
 	}
@@ -169,12 +182,16 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 // handleRaw 原样输出文件字节，供下载（内容与库中文件逐字节一致）。
 func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	rel := r.URL.Query().Get("path")
-	if strings.TrimSpace(rel) == "" {
-		s.writeJSONError(w, http.StatusBadRequest, "missing path")
+	if err := validateRelPath(rel); err != nil {
+		s.writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	data, err := s.store.Read(rel)
 	if err != nil {
+		if s.pathIsDir(rel) {
+			s.writeJSONError(w, http.StatusBadRequest, "path is a directory (use the tree API)")
+			return
+		}
 		s.storeError(w, err)
 		return
 	}
@@ -184,8 +201,37 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(data); err != nil {
-		s.logf("web: write raw %s: %v", rel, err)
+		s.logf("web: write raw %s: %v", sanitizeLogField(rel), err)
 	}
+}
+
+// validateRelPath 校验路径的字面形态：空、超长、单级分量超长、含控制字符
+// （含 NUL）一律判为客户端输入错误。**不做文件系统访问**——沙箱判定交给
+// store.Read，避免在越界路径上产生"根外是否存在"的探测口。
+func validateRelPath(rel string) error {
+	if strings.TrimSpace(rel) == "" {
+		return errors.New("missing path")
+	}
+	if len(rel) > maxRelPathLen {
+		return fmt.Errorf("path too long (max %d bytes)", maxRelPathLen)
+	}
+	for _, part := range strings.FieldsFunc(rel, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if len(part) > maxPathComponentLen {
+			return fmt.Errorf("path component too long (max %d bytes)", maxPathComponentLen)
+		}
+	}
+	if strings.ContainsFunc(rel, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return errors.New("invalid path (control character)")
+	}
+	return nil
+}
+
+// pathIsDir 报告 rel 是否为目录。**只在 store.Read 失败后调用**：此时 rel 已
+// 通过沙箱校验（越界路径不会走到这里），Stat 不构成越界信息泄露；Stat 自身
+// 失败一律按"不是目录"处理，交由 storeError 归类。
+func (s *Server) pathIsDir(rel string) bool {
+	info, err := os.Stat(filepath.Join(s.store.Root(), filepath.FromSlash(rel)))
+	return err == nil && info.IsDir()
 }
 
 // searchHit 是单条命中。

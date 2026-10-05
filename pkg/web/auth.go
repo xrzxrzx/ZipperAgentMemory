@@ -119,15 +119,20 @@ func NewAuthenticator(token string) *Authenticator {
 	return &Authenticator{token: token, now: time.Now, fails: make(map[string]*failState)}
 }
 
-// Credential 提取请求携带的口令：优先 Authorization: Bearer，其次登录 Cookie。
-func (a *Authenticator) Credential(r *http.Request) string {
+// Authenticate 校验请求携带的口令：Bearer 有效即通过；Bearer 存在但无效时
+// **继续检查 Cookie**（避免客户端残留的过期 Bearer 头把有效会话顶掉）；
+// 两者都无效返回 false。
+func (a *Authenticator) Authenticate(r *http.Request) bool {
 	if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "bearer ") {
-		return strings.TrimSpace(h[7:])
+		if a.Valid(strings.TrimSpace(h[7:])) {
+			return true
+		}
 	}
-	if c, err := r.Cookie(CookieName); err == nil {
-		return c.Value
+	c, err := r.Cookie(CookieName)
+	if err != nil {
+		return false
 	}
-	return ""
+	return a.Valid(c.Value)
 }
 
 // Valid 以常量时间比较口令，避免逐字符比较泄露信息。
