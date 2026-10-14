@@ -46,7 +46,8 @@
 2. 符号链接解析**必须用组件级 `Lstat + os.Readlink`**（加递归深度上限防链接环），**禁止只用 `filepath.EvalSymlinks`**——Windows 上 EvalSymlinks 不解析目录联接（junction），存在写穿根目录漏洞（阶段 1 实测发现并修复，见 docs/验收/阶段1.md §6.1）；组件级解析对符号链接与 junction 均有效，Linux 语义与 EvalSymlinks 一致；
 3. 路径穿越一律返回 `ErrPathOutsideRoot`，不静默裁剪；
 4. 禁止直接用用户输入拼 `exec.Command` 参数；调 git 等外部命令时必须参数数组传参（禁用 shell 字符串）；
-5. 文件读写用 `os.OpenFile` + 显式权限（0644/0755），不依赖 umask 猜测。
+5. 文件读写用 `os.OpenFile` + 显式权限（0644/0755），不依赖 umask 猜测；
+6. **文件系统访问（含元数据查询）必须先经 `memory.Store` 沙箱**：`web`/`mcp` 层禁止对**请求或 agent 提供的路径**直接 `os.Stat`/`os.Lstat`/`os.ReadFile`/`os.ReadDir`，也禁止自行 `filepath.Join(store.Root(), rel)` 后再访问——`Join` 会先把 `..` 归一化，等于绕过沙箱（需求-004 实测：越界路径被真正 Stat，形成"根外是否存在"的存在性预言机，可用响应文案区分）。需要目录判定 / mtime 等元数据时用 `Store.IsDir` / `Store.ModTime`（内部先 `resolve` 再 `Stat`）。
 
 ## 6. 原子写与索引一致性
 
