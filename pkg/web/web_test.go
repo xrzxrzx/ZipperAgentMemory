@@ -51,7 +51,16 @@ const testToken = "test-token-0123456789abcdefghijklmn"
 // newTestEnv 装配环境并写入若干测试文件（同时重建索引）。
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	root := t.TempDir()
+	return newTestEnvAt(t, t.TempDir())
+}
+
+// newTestEnvAt 与 newTestEnv 相同，但使用指定的记忆库根目录。
+// 用途：需求-004 回归用例需要构造「根目录之外存在同级目录」的场景。
+func newTestEnvAt(t *testing.T, root string) *testEnv {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	store, err := memory.OpenStore(root)
 	if err != nil {
 		t.Fatal(err)
@@ -512,6 +521,80 @@ func TestPathTraversalRejected(t *testing.T) {
 		if strings.Contains(string(body), "root:") {
 			t.Errorf("穿越请求 %q 泄露了根外内容：%s", c.path, body)
 		}
+	}
+}
+
+// TestOutsideRootDirectoryOracleClosed 回归（需求-004）：越界路径不得暴露根外目录存在性。
+//
+// 旧实现（pathIsDir 用 filepath.Join 拼接后直接 os.Stat）会让「根外存在的目录」返回
+// "path is a directory (use the tree API)"，而「根外不存在」返回 "invalid path"——
+// 两者可区分，即构成任意路径处的目录存在性预言机。本用例断言越界情形下响应与
+// 「根外不存在」**逐字节相同**；旧用例只断言状态码 400（两条分支同为 400），
+// 因而结构性漏掉了该缺陷。
+func TestOutsideRootDirectoryOracleClosed(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "root")
+	outside := filepath.Join(parent, "outside") // 根外「存在的目录」
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := newTestEnvAt(t, root)
+
+	// 基准：根外不存在。其余各条一旦与基准响应不同，即等价于泄露根外目录存在性。
+	probes := []string{
+		"../outside",          // 根外存在的目录（旧实现 → path is a directory）
+		"..",                  // 根外存在的父目录
+		"..%2Foutside",        // 同上，编码变体
+		"../../..",            // 存在的祖先目录
+		"../root",             // 文本形态越界，实际指向根本身
+		"../outside/child.md", // 根外不存在（父目录存在）
+	}
+	for _, ep := range []string{"/memory/api/file", "/memory/api/raw"} {
+		t.Run(ep, func(t *testing.T) {
+			ref := env.do(t, http.MethodGet, ep+"?path=../nosuchdir-zzz", testToken, "application/json")
+			refStatus := ref.StatusCode
+			refBody, err := io.ReadAll(ref.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if refStatus != http.StatusBadRequest {
+				t.Fatalf("基准（根外不存在）= %d，want 400", refStatus)
+			}
+			var payload map[string]string
+			if err := json.Unmarshal(refBody, &payload); err != nil {
+				t.Fatalf("基准响应不是 JSON：%q", refBody)
+			}
+			if payload["error"] != "invalid path" {
+				t.Fatalf("基准文案 = %q，want invalid path", payload["error"])
+			}
+			for _, p := range probes {
+				res := env.do(t, http.MethodGet, ep+"?path="+p, testToken, "application/json")
+				body, err := io.ReadAll(res.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if res.StatusCode != refStatus || !bytes.Equal(body, refBody) {
+					t.Errorf("越界路径 %q 的响应与「根外不存在」不一致（可区分 = 泄露根外目录存在性）：\n"+
+						"  got  %d %s\n  want %d %s", p, res.StatusCode, body, refStatus, refBody)
+				}
+			}
+
+			// 正向回归：修复不得误伤根内行为。
+			res := env.do(t, http.MethodGet, ep+"?path=notes", testToken, "application/json")
+			if res.StatusCode != http.StatusBadRequest {
+				t.Errorf("根内目录 = %d，want 400", res.StatusCode)
+			}
+			body, err := io.ReadAll(res.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(body), "is a directory") {
+				t.Errorf("根内目录文案 = %q，want 含 is a directory", body)
+			}
+			if res := env.do(t, http.MethodGet, ep+"?path=notes%2Fnope.md", testToken, "application/json"); res.StatusCode != http.StatusNotFound {
+				t.Errorf("根内不存在 = %d，want 404", res.StatusCode)
+			}
+		})
 	}
 }
 

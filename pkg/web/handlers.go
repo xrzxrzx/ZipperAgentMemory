@@ -273,12 +273,13 @@ func validateRelPath(rel string) error {
 	return nil
 }
 
-// pathIsDir 报告 rel 是否为目录。**只在 store.Read 失败后调用**：此时 rel 已
-// 通过沙箱校验（越界路径不会走到这里），Stat 不构成越界信息泄露；Stat 自身
-// 失败一律按"不是目录"处理，交由 storeError 归类。
+// pathIsDir 报告 rel 是否为目录。**元数据查询一律经 store 沙箱**（需求-004）：
+// 越界路径在沙箱处即失败（ErrPathOutsideRoot）→ 按"不是目录"处理，交由
+// storeError 归类。绝不在此自行拼接路径 + os.Stat——拼接会先把 `..` 归一化，
+// 使根外目标被真正 Stat，从而暴露"根外是否存在目录"。
 func (s *Server) pathIsDir(rel string) bool {
-	info, err := os.Stat(filepath.Join(s.store.Root(), filepath.FromSlash(rel)))
-	return err == nil && info.IsDir()
+	isDir, err := s.store.IsDir(rel)
+	return err == nil && isDir
 }
 
 // searchHit 是单条命中。
@@ -328,13 +329,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // mtimeOf 返回文件修改时间（RFC3339）；取不到时返回空串（展示层面可缺省）。
-// 只读元数据：rel 已在 store.Read 中通过路径沙箱校验，此处仅做拼接与 stat。
+// 元数据经 store.ModTime 沙箱完成（需求-004）：阅读页不直接接触文件系统。
 func (s *Server) mtimeOf(rel string) string {
-	info, err := os.Stat(filepath.Join(s.store.Root(), filepath.FromSlash(rel)))
+	mt, err := s.store.ModTime(rel)
 	if err != nil {
 		return ""
 	}
-	return info.ModTime().Format(time.RFC3339)
+	return mt.Format(time.RFC3339)
 }
 
 // storeError 把底层错误映射为对外状态码：路径类错误 400、不存在 404、

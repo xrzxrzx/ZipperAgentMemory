@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // 哨兵错误（规范 §3.3）：供 errors.Is 判断，禁止字符串比较。
@@ -169,4 +170,48 @@ func (s *Store) Read(rel string) ([]byte, error) {
 		return nil, fmt.Errorf("memory: read %q: %w", rel, err)
 	}
 	return data, nil
+}
+
+// IsDir 报告 rel 是否为根内目录。rel 先经 resolve 沙箱校验：越界返回
+// ErrPathOutsideRoot，Stat 失败返回包装后的底层错误。
+//
+// 为什么必须有这个方法：上层（阅读页）需要「是不是目录」这类元数据时，
+// 若自行 filepath.Join(root, rel) + os.Stat，拼接会先把 `..` 归一化掉，
+// 于是根外路径被真正 Stat——形成「根外是否存在」的存在性预言机
+// （需求-004 修复前的实际缺陷）。元数据查询与内容读取一样，必须经沙箱。
+func (s *Store) IsDir(rel string) (bool, error) {
+	info, err := s.stat(rel)
+	if err != nil {
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
+// ModTime 返回 rel 的修改时间；沙箱校验与错误语义同 IsDir。
+func (s *Store) ModTime(rel string) (time.Time, error) {
+	info, err := s.stat(rel)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
+}
+
+// stat 是根内元数据查询的共同实现：**先沙箱后 Stat**——路径被判为越界
+// （`..`、绝对路径、带卷名路径）时，在 resolve 内先于任何文件访问即返回
+// ErrPathOutsideRoot，**目标不会被 Stat**。
+//
+// 边界（独立验证 P3-2）：解析根内符号链接/junction 需要逐组件 Lstat
+// （resolvePathDepth），故「不发生任何文件系统访问」仅对越界字面路径成立；
+// 链接逃逸情形下 Stat 同样不会发生，且响应与「不存在」逐字节相同
+// （见 docs/features/需求-004-根外目录预言机修复/验收.md §3）。
+func (s *Store) stat(rel string) (os.FileInfo, error) {
+	p, err := s.resolve(rel)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		return nil, fmt.Errorf("memory: stat %q: %w", rel, err)
+	}
+	return info, nil
 }

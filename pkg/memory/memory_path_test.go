@@ -116,6 +116,63 @@ func TestSymlinkDirEscapeRejected(t *testing.T) {
 	if err := st.Append("evil/f.md", "x"); !errors.Is(err, ErrPathOutsideRoot) {
 		t.Fatalf("Append 期望 ErrPathOutsideRoot，实际 %v", err)
 	}
+	// 元数据查询同样必须在沙箱处失败（需求-004）。
+	if _, err := st.IsDir("evil/f.md"); !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("IsDir 期望 ErrPathOutsideRoot，实际 %v", err)
+	}
+	if _, err := st.ModTime("evil/f.md"); !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("ModTime 期望 ErrPathOutsideRoot，实际 %v", err)
+	}
+}
+
+// TestIsDirAndModTimeSandboxed 覆盖沙箱内元数据查询（需求-004）：
+// 越界路径必须在沙箱处失败——**根外目标连 Stat 都不发生**；根内三种形态正常返回。
+func TestIsDirAndModTimeSandboxed(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes", "a.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 根内：目录 / 文件 / 根目录 / 不存在。
+	if isDir, err := st.IsDir("notes"); err != nil || !isDir {
+		t.Errorf("IsDir(notes) = %v, %v；want true, nil", isDir, err)
+	}
+	if isDir, err := st.IsDir("."); err != nil || !isDir {
+		t.Errorf("IsDir(.) = %v, %v；want true, nil", isDir, err)
+	}
+	if isDir, err := st.IsDir("notes/a.md"); err != nil || isDir {
+		t.Errorf("IsDir(notes/a.md) = %v, %v；want false, nil", isDir, err)
+	}
+	if mt, err := st.ModTime("notes/a.md"); err != nil || mt.IsZero() {
+		t.Errorf("ModTime(notes/a.md) = %v, %v；want 非零时间, nil", mt, err)
+	}
+	if _, err := st.IsDir("notes/nope.md"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("IsDir(不存在) 期望 os.ErrNotExist，实际 %v", err)
+	}
+	if _, err := st.ModTime("notes/nope.md"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ModTime(不存在) 期望 os.ErrNotExist，实际 %v", err)
+	}
+
+	// 越界：一律 ErrPathOutsideRoot（绝不 Stat 根外目标）。
+	traversal := []string{"..", "../x.md", "notes/../../x.md", filepath.Join(t.TempDir(), "outside")}
+	if filepath.VolumeName(`C:\Windows\win.ini`) != "" {
+		traversal = append(traversal, `C:\Windows\win.ini`) // 平台无卷名语义时跳过
+	}
+	for _, rel := range traversal {
+		if _, err := st.IsDir(rel); !errors.Is(err, ErrPathOutsideRoot) {
+			t.Errorf("IsDir(%q) 期望 ErrPathOutsideRoot，实际 %v", rel, err)
+		}
+		if _, err := st.ModTime(rel); !errors.Is(err, ErrPathOutsideRoot) {
+			t.Errorf("ModTime(%q) 期望 ErrPathOutsideRoot，实际 %v", rel, err)
+		}
+	}
 }
 
 // TestSymlinkFileEscapeRejected 覆盖符号链接（文件）逃逸：根内链接指向根外文件。
