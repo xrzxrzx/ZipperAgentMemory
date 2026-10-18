@@ -120,6 +120,33 @@ func TestTokenizeForFTS(t *testing.T) {
 	}
 }
 
+// TestTokenizeBigram（AC6 基础）相邻二字组切分：仅当两个字符都是 CJK 且原文
+// 下标相邻时生成；标点、空白、换行、英文都会打断（这正是精确率的来源）。
+func TestTokenizeBigram(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"生日快乐", "生日 日快 快乐 "},
+		{"生日", "生日 "},
+		{"语言学习", "语言 言学 学习 "},
+		{"生", ""},            // 单字不生成
+		{"生，日", ""},          // 中文逗号打断
+		{"生 日", ""},          // 空格打断
+		{"生\t日", ""},         // 制表符打断
+		{"生日\n快乐", "生日 快乐 "}, // 换行打断
+		{"a生日", "生日 "},       // 左边界被英文打断
+		{"生日b", "生日 "},       // 右边界被英文打断
+		{"", ""},
+		{"abc", ""},
+	}
+	for _, tt := range tests {
+		if got := tokenizeBigramForFTS(tt.in); got != tt.want {
+			t.Errorf("tokenizeBigramForFTS(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestUntokenizeSnippet(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"[ 李 白 ]", "[ 李白 ]"},

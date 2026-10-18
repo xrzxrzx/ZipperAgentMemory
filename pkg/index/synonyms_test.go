@@ -104,3 +104,35 @@ func TestSynonymCacheFollowsFile(t *testing.T) {
 		t.Fatalf("删除文件后应退化为 nil，实际 %v", got)
 	}
 }
+
+// TestParseSynonymsRejectsControlChars（AC2 / P1-2）含控制字符（尤其 NUL）的成员
+// 必须被丢弃——它们会破坏 FTS5 MATCH 表达式，让**无关**查询报
+// "unterminated string" 并连带让 web 出口 500。
+func TestParseSynonymsRejectsControlChars(t *testing.T) {
+	tab := parseSynonyms("空\x00字节\tnul\n正常组\tnormal\n")
+	if got := tab.lookup("nul"); got != nil {
+		t.Errorf("含 NUL 的行应整行丢弃，实际登记了 %v", got)
+	}
+	if got := tab.lookup("normal"); len(got) != 2 {
+		t.Errorf("正常行不应受影响，实际 %v", got)
+	}
+}
+
+// TestParseSynonymsToleratesBOM（P2-6）带 UTF-8 BOM 的别名表应正常加载
+// —— PowerShell 5.1 的 `Out-File -Encoding utf8` 默认写 BOM。
+func TestParseSynonymsToleratesBOM(t *testing.T) {
+	tab := parseSynonyms("\uFEFF密码\tpassword\n")
+	if got := tab.lookup("password"); len(got) != 2 {
+		t.Fatalf("带 BOM 的表应正常加载，实际 %v", got)
+	}
+}
+
+// TestSynonymLookupCaseInsensitive（P2-4）英文别名查找大小写不敏感。
+func TestSynonymLookupCaseInsensitive(t *testing.T) {
+	tab := parseSynonyms("密码\tpassword\n")
+	for _, q := range []string{"password", "PASSWORD", "Password"} {
+		if got := tab.lookup(q); len(got) != 2 {
+			t.Errorf("lookup(%q) 应大小写不敏感，实际 %v", q, got)
+		}
+	}
+}

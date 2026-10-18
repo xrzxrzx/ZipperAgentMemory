@@ -45,6 +45,11 @@ func ShouldIndex(rel string, isDir bool) bool {
 	if strings.HasPrefix(base, ".tmp-") {
 		return false
 	}
+	// 别名表是**检索配置**而非记忆内容：不索引它，否则查同义词时
+	// `meta/synonyms.tsv` 自身常排在真实文档之前（独立验证 P2-3）。
+	if !isDir && rel == "meta/synonyms.tsv" {
+		return false
+	}
 	if isDir {
 		return true
 	}
@@ -115,7 +120,7 @@ func (ix *Index) Rebuild(store *memory.Store) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("index: rebuild commit: %w", err)
 	}
-	ix.stale = false
+	ix.stale.Store(false)
 	return count, nil
 }
 

@@ -520,6 +520,94 @@ func TestBigramPrecision(t *testing.T) {
 	}
 }
 
+// TestPunctuationQuery（P1-1 回归）CJK 关键词附带标点/引号/括号时不得变成 0 命中。
+// 批 B 初版把纯标点段当成「必须存在的短语」AND 进表达式，该短语不含 token ⇒
+// 表达式恒假 ⇒ 正常输入被静默吞掉（独立验证发现并实测旧版 9 篇全命中、新版全 0）。
+func TestPunctuationQuery(t *testing.T) {
+	ix := openTestIndex(t)
+	mustUpsert(t, ix, "notes/birthday.md", "我的生日是三月十日")
+	for _, q := range []string{
+		"生日", "生日,", "生日：", "生日。", "「生日」", "(生日)", `"生日"`, "生日*", "生日!",
+	} {
+		if got := searchPaths(t, ix, q); !contains(got, "notes/birthday.md") {
+			t.Errorf("查 %q 应命中 notes/birthday.md，实际 %v", q, got)
+		}
+	}
+}
+
+// TestSingleCharQuery（AC7）单字中文查询必须命中——这是 AC7 的直接用例。
+// 原验收引用 TestSearchChineseHit（查「语言」两字）属证据错引（P1-4）。
+func TestSingleCharQuery(t *testing.T) {
+	ix := openTestIndex(t)
+	mustUpsert(t, ix, "notes/a.md", "生理与日常记录")
+	mustUpsert(t, ix, "notes/b.md", "生，日这两个字被标点隔开")
+	for _, path := range []string{"notes/a.md", "notes/b.md"} {
+		if got := searchPaths(t, ix, "生"); !contains(got, path) {
+			t.Errorf("单字「生」应命中 %s，实际 %v", path, got)
+		}
+	}
+}
+
+// TestOldSchemaEmptyDocsIsStale（P2-1）旧 5 列表结构 + docs 为空，不得被误判为
+// 全新库——否则后续写入会永久报「no column named body_bg」，且永不触发 ErrIndexStale。
+func TestOldSchemaEmptyDocsIsStale(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old.sqlite")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	if _, err := raw.Exec(`
+CREATE TABLE docs (
+	id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, mtime INTEGER NOT NULL,
+	size INTEGER NOT NULL, tags TEXT NOT NULL DEFAULT '',
+	created TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT ''
+);
+CREATE VIRTUAL TABLE docs_fts USING fts5(tags, created, source, body, path UNINDEXED);
+`); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	raw.Close()
+
+	ix, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer ix.Close()
+	if !ix.stale.Load() {
+		t.Fatal("旧 5 列表结构应判为 stale（即使 docs 为空）")
+	}
+}
+
+// TestRemoveRejectsStale（P2-2）stale 索引上 Remove 必须拒绝，
+// 否则 watcher 会继续修改旧格式索引。
+func TestRemoveRejectsStale(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "stale.sqlite")
+	ix, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustUpsert(t, ix, "notes/a.md", "苹果")
+	ix.Close()
+
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 0"); err != nil {
+		t.Fatalf("reset user_version: %v", err)
+	}
+	raw.Close()
+
+	ix2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open stale: %v", err)
+	}
+	defer ix2.Close()
+	if err := ix2.Remove("notes/a.md"); !errors.Is(err, ErrIndexStale) {
+		t.Fatalf("stale 下 Remove 应返回 ErrIndexStale，实际 %v", err)
+	}
+}
+
 // TestSynonymExpansionBaseline（AC1）现状记录：正文含「密码」时，用英文
 // password 查询搜不到（别名扩展尚未实现）。
 //
@@ -617,7 +705,7 @@ func TestSnippetLength(t *testing.T) {
 // TestOpenMarksFreshIndex（AC8）新建空库应被标为当前版本，否则首次使用就要 rebuild。
 func TestOpenMarksFreshIndex(t *testing.T) {
 	ix := openTestIndex(t)
-	if ix.stale {
+	if ix.stale.Load() {
 		t.Fatal("新建空库不应被标记为 stale")
 	}
 	if _, err := ix.Search("任意", 10); err != nil {
@@ -653,7 +741,7 @@ func TestIndexStaleDetection(t *testing.T) {
 		t.Fatalf("Open stale: %v", err)
 	}
 	defer ix2.Close()
-	if !ix2.stale {
+	if !ix2.stale.Load() {
 		t.Fatal("旧版索引应被标记为 stale")
 	}
 	if _, err := ix2.Search("苹果", 10); !errors.Is(err, ErrIndexStale) {
@@ -677,7 +765,7 @@ func TestIndexStaleDetection(t *testing.T) {
 	if _, err := ix2.Rebuild(store); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
-	if ix2.stale {
+	if ix2.stale.Load() {
 		t.Fatal("rebuild 后不应仍为 stale")
 	}
 	if got := searchPaths(t, ix2, "苹果"); !contains(got, "notes/a.md") {

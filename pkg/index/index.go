@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -49,10 +50,12 @@ type Result struct {
 // 不额外取 ix.mu（与写操作共享同一连接池，SQLite 内部排队）。
 // 索引是 derived state，方法不假设调用方持有任何文件锁。
 type Index struct {
-	db    *sql.DB
-	mu    sync.Mutex
-	syn   *synonymCache // 别名表（可为 nil：未启用或不适用）
-	stale bool          // 索引内容格式过时（Search/Upsert 一律拒绝，见 ErrIndexStale）
+	db  *sql.DB
+	mu  sync.Mutex
+	syn *synonymCache // 别名表（可为 nil：未启用或不适用）
+	// stale 表示索引内容格式过时（Search/Upsert/Remove 一律拒绝，见 ErrIndexStale）。
+	// 用 atomic：Rebuild 在 mu 内写、读路径不取 mu，避免数据竞争（独立验证 P2-7）。
+	stale atomic.Bool
 }
 
 // Option 是 Open 的可选装配项（变参形式，保持既有 Open(dbPath) 调用不变）。
@@ -146,30 +149,58 @@ func (ix *Index) init() error {
 //
 // 语义：
 //   - user_version 等于当前版本 → 可用；
-//   - user_version == 0 且 docs 表为空 → 全新库/空库，直接标为当前版本；
-//   - 其余（旧版本已有数据、或未知的更高版本）→ stale，Search/Upsert 返回
-//     ErrIndexStale，绝不静默用旧索引出结果。
+//   - user_version == 0 且 **表结构已是当前版本** 且 docs 为空 → 全新库/空库，
+//     直接标为当前版本；
+//   - 其余（旧版本已有数据、旧 5 列表结构、未知更高版本）→ stale，
+//     Search/Upsert/Remove 返回 ErrIndexStale，绝不静默用旧索引出结果。
+//
+// 注意：只按 docs 行数判定会把「旧 5 列表结构 + docs 为空」误判为全新库，
+// 之后每次写入都会报 `no column named body_bg` 且永不触发 ErrIndexStale
+// （独立验证 P2-1），故必须同时校验列结构。
 func (ix *Index) checkSchemaVersion() error {
 	var v int
 	if err := ix.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		return fmt.Errorf("index: read user_version: %w", err)
 	}
 	if v == indexSchemaVersion {
-		ix.stale = false
+		ix.stale.Store(false)
 		return nil
 	}
-	if v == 0 {
+	hasBodyBG, err := ix.ftsHasColumn("body_bg")
+	if err != nil {
+		return err
+	}
+	if v == 0 && hasBodyBG {
 		var n int
 		if err := ix.db.QueryRow("SELECT COUNT(*) FROM docs").Scan(&n); err != nil {
 			return fmt.Errorf("index: count docs: %w", err)
 		}
 		if n == 0 {
-			ix.stale = false
+			ix.stale.Store(false)
 			return ix.writeSchemaVersion()
 		}
 	}
-	ix.stale = true
+	ix.stale.Store(true)
 	return nil
+}
+
+// ftsHasColumn 报告 docs_fts 是否含指定列。
+func (ix *Index) ftsHasColumn(name string) (bool, error) {
+	rows, err := ix.db.Query(`SELECT name FROM pragma_table_info('docs_fts')`)
+	if err != nil {
+		return false, fmt.Errorf("index: read docs_fts columns: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return false, fmt.Errorf("index: scan docs_fts column: %w", err)
+		}
+		if col == name {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // writeSchemaVersion 把当前内容格式版本写入数据库。
@@ -198,7 +229,7 @@ func (ix *Index) Upsert(path string, m Meta, content []byte) error {
 	if path == "" {
 		return fmt.Errorf("index: upsert empty path")
 	}
-	if ix.stale {
+	if ix.stale.Load() {
 		return ErrIndexStale
 	}
 	ix.mu.Lock()
@@ -248,9 +279,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 }
 
 // Remove 删除 path 的索引记录。path 不存在时返回 nil（幂等）。
+// 索引 stale 时拒绝执行——否则 watcher 会持续在旧格式索引上做修改（独立验证 P2-2）。
 func (ix *Index) Remove(path string) error {
 	if path == "" {
 		return nil
+	}
+	if ix.stale.Load() {
+		return ErrIndexStale
 	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -335,7 +370,7 @@ func (ix *Index) SearchMode(query string, limit int, mode Mode) ([]Result, error
 	if strings.TrimSpace(query) == "" {
 		return nil, ErrEmptyQuery
 	}
-	if ix.stale {
+	if ix.stale.Load() {
 		return nil, ErrIndexStale
 	}
 	if limit <= 0 {
@@ -349,8 +384,10 @@ func (ix *Index) SearchMode(query string, limit int, mode Mode) ([]Result, error
 	const (
 		// pathBoostFactor / pathFetchCap 控制超额取行：路径命中的行可能排在
 		// bm25 靠后，只取 limit 行会漏掉（AC3），故多取后在 Go 侧排序截断。
-		pathBoostFactor = 5
-		pathFetchCap    = 200
+		// 取 20 倍并放宽到 500：独立验证 P2-5 指出 5×/200 在命中集较大时
+		// 仍可能让路径命中者落选（limit=20 → 只取 100 行）。
+		pathBoostFactor = 20
+		pathFetchCap    = 500
 	)
 	fetchLimit := limit * pathBoostFactor
 	if fetchLimit > pathFetchCap {
@@ -500,7 +537,10 @@ func plainClause(raw string) string {
 		case seg.cjk:
 			parts = append(parts, `"`+escapeFTS(seg.text)+`"`)
 		default:
-			if w := strings.TrimSpace(seg.text); w != "" {
+			// 无可检索字符的段（纯标点、纯空白）必须**丢弃**：它不产生任何 FTS
+			// token，若包成短语并 AND 进表达式会恒假，导致「生日,」「(生日)」
+			// 这类正常输入静默 0 命中（独立验证 P1-1）。
+			if w := strings.TrimSpace(seg.text); w != "" && hasIndexableRune(w) {
 				parts = append(parts, `"`+escapeFTS(w)+`"`)
 			}
 		}
