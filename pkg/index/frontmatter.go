@@ -132,3 +132,46 @@ func untokenizeSnippet(s string) string {
 	}
 	return b.String()
 }
+
+// tokenizeMetaForFTS 是 tags/created/source 这类**元数据列**的切分方式：
+// 单字切分与相邻二字组混写。
+//
+// 理由：元数据列（尤其 tags）常放中文关键词，但正文的二字组在 body_bg 列里，
+// 元数据列若只有单字 token，「部署」这类 ≥2 字查询就命中不到 tag 里的中文。
+// 混写后单字查询与二字组查询都能命中，且不改变原有单字匹配行为（AC7）。
+func tokenizeMetaForFTS(s string) string {
+	uni := tokenizeForFTS(s)
+	if uni == "" {
+		return ""
+	}
+	return uni + " " + tokenizeBigramForFTS(s)
+}
+
+// tokenizeBigramForFTS 生成「相邻二字组」token 串，供 FTS5 的 body_bg 列使用。
+//
+// 规则（技术方案.md §3.3）：
+//   - 仅当相邻两个字符**都是 CJK 且原文下标相邻**时生成该二字组；
+//     标点、空白、英文、数字都会打断，不跨越生成；
+//   - 二字组内部**不加空格**（unicode61 把连续 Han 字符合成一个 token），
+//     组与组之间以空格分隔。
+//
+// 效果：
+//
+//	"生日快乐" → "生日 日快 快乐 "
+//	"生，日"   → ""（逗号处断开，不生成「生日」）
+//	"生 日"    → ""（空白处断开）
+//
+// 这正是批次 B 消除「被标点隔开的两个字也算连续词」误命中的基础。
+func tokenizeBigramForFTS(s string) string {
+	runes := []rune(s)
+	var b strings.Builder
+	b.Grow(len(s) * 2)
+	for i := 0; i+1 < len(runes); i++ {
+		if isCJKRune(runes[i]) && isCJKRune(runes[i+1]) {
+			b.WriteRune(runes[i])
+			b.WriteRune(runes[i+1])
+			b.WriteByte(' ')
+		}
+	}
+	return b.String()
+}

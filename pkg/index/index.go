@@ -17,6 +17,10 @@ import (
 var (
 	// ErrEmptyQuery 表示搜索查询为空（空白字符串）。
 	ErrEmptyQuery = errors.New("index: empty search query")
+
+	// ErrIndexStale 表示索引内容格式与当前代码不一致（索引是旧版本建的），
+	// 必须执行 rebuild-index 后才能使用。**不会**静默回退到旧索引出结果。
+	ErrIndexStale = errors.New("index: index schema is stale, run rebuild-index")
 )
 
 // Meta 是一条文档记录的索引元数据：文件系统属性 + front-matter 提取字段。
@@ -45,9 +49,10 @@ type Result struct {
 // 不额外取 ix.mu（与写操作共享同一连接池，SQLite 内部排队）。
 // 索引是 derived state，方法不假设调用方持有任何文件锁。
 type Index struct {
-	db  *sql.DB
-	mu  sync.Mutex
-	syn *synonymCache // 别名表（可为 nil：未启用或不适用）
+	db    *sql.DB
+	mu    sync.Mutex
+	syn   *synonymCache // 别名表（可为 nil：未启用或不适用）
+	stale bool          // 索引内容格式过时（Search/Upsert 一律拒绝，见 ErrIndexStale）
 }
 
 // Option 是 Open 的可选装配项（变参形式，保持既有 Open(dbPath) 调用不变）。
@@ -62,10 +67,15 @@ func WithSynonyms(path string) Option {
 // schema 创建 docs 与 docs_fts 两表（幂等）。
 //
 // docs_fts 各列：
-//   - tags/created/source/body：FTS5 索引列，入库前经 tokenizeForFTS 切分
-//     （CJK 单字化，见 doc.go）；snippet 取 body 列（列序 3）；
+//   - tags/created/source/body：FTS5 索引列，入库前经 tokenizeForFTS 做 CJK 单字切分
+//     （见 doc.go）；snippet 取 body 列（列序 3）；
+//   - body_bg：相邻二字组（tokenizeBigramForFTS），供 ≥2 字 CJK 查询使用，
+//     使「被标点/空白隔开的两个字」不再被当作连续词命中（需求-005 AC6）；
 //   - path：UNINDEXED 列——随行存储但不参与分词与匹配，供结果输出；
 //     路径查表走 docs.path 唯一索引，不经 FTS。
+//
+// **列序即契约**：bm25() 的权重参数按列序给出，snippet 的列下标也依赖它。
+// 变更列序必须递增 indexSchemaVersion（见下）。
 const schema = `
 CREATE TABLE IF NOT EXISTS docs (
 	id      INTEGER PRIMARY KEY,
@@ -77,10 +87,19 @@ CREATE TABLE IF NOT EXISTS docs (
 	source  TEXT NOT NULL DEFAULT ''
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
-	tags, created, source, body,
+	tags, created, source, body, body_bg,
 	path UNINDEXED
 );
 `
+
+// indexSchemaVersion 是索引**内容格式**版本（与 docs 表结构无关）：
+//
+//	0（未设置）= 旧版：CJK 单字切分，5 列
+//	2         = 单字 + 相邻二字组，6 列（含 body_bg）
+//
+// 切分方式、列集合、列序任一变化都必须递增此值，使旧索引被识别为过时并
+// 强制重建（需求-005 AC8）——否则会静默用旧索引给出错误结果。
+const indexSchemaVersion = 2
 
 // Open 打开（或创建）dbPath 处的索引并返回 Index。
 // 打开时确保 WAL 模式与 schema 就绪；dbPath 所在目录必须可写。
@@ -120,6 +139,45 @@ func (ix *Index) init() error {
 	if _, err := ix.db.Exec(schema); err != nil {
 		return fmt.Errorf("index: create schema: %w", err)
 	}
+	return ix.checkSchemaVersion()
+}
+
+// checkSchemaVersion 判定索引内容格式是否与当前代码一致（AC8）。
+//
+// 语义：
+//   - user_version 等于当前版本 → 可用；
+//   - user_version == 0 且 docs 表为空 → 全新库/空库，直接标为当前版本；
+//   - 其余（旧版本已有数据、或未知的更高版本）→ stale，Search/Upsert 返回
+//     ErrIndexStale，绝不静默用旧索引出结果。
+func (ix *Index) checkSchemaVersion() error {
+	var v int
+	if err := ix.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return fmt.Errorf("index: read user_version: %w", err)
+	}
+	if v == indexSchemaVersion {
+		ix.stale = false
+		return nil
+	}
+	if v == 0 {
+		var n int
+		if err := ix.db.QueryRow("SELECT COUNT(*) FROM docs").Scan(&n); err != nil {
+			return fmt.Errorf("index: count docs: %w", err)
+		}
+		if n == 0 {
+			ix.stale = false
+			return ix.writeSchemaVersion()
+		}
+	}
+	ix.stale = true
+	return nil
+}
+
+// writeSchemaVersion 把当前内容格式版本写入数据库。
+// PRAGMA 不支持参数绑定，此处拼接的是编译期常量，不含外部输入。
+func (ix *Index) writeSchemaVersion() error {
+	if _, err := ix.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", indexSchemaVersion)); err != nil {
+		return fmt.Errorf("index: write user_version: %w", err)
+	}
 	return nil
 }
 
@@ -139,6 +197,9 @@ func (ix *Index) Close() error {
 func (ix *Index) Upsert(path string, m Meta, content []byte) error {
 	if path == "" {
 		return fmt.Errorf("index: upsert empty path")
+	}
+	if ix.stale {
+		return ErrIndexStale
 	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -173,9 +234,10 @@ ON CONFLICT(path) DO UPDATE SET
 	}
 	ftsBody := tokenizeForFTS(string(content))
 	if _, err := tx.Exec(`
-INSERT INTO docs_fts(rowid, tags, created, source, body, path)
-VALUES (?, ?, ?, ?, ?, ?)`,
-		id, tokenizeForFTS(m.Tags), tokenizeForFTS(m.Created), tokenizeForFTS(m.Source), ftsBody, path); err != nil {
+INSERT INTO docs_fts(rowid, tags, created, source, body, body_bg, path)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, tokenizeMetaForFTS(m.Tags), tokenizeMetaForFTS(m.Created), tokenizeMetaForFTS(m.Source),
+		ftsBody, tokenizeBigramForFTS(string(content)), path); err != nil {
 		return fmt.Errorf("index: upsert %q fts insert: %w", path, err)
 	}
 
@@ -273,6 +335,9 @@ func (ix *Index) SearchMode(query string, limit int, mode Mode) ([]Result, error
 	if strings.TrimSpace(query) == "" {
 		return nil, ErrEmptyQuery
 	}
+	if ix.stale {
+		return nil, ErrIndexStale
+	}
 	if limit <= 0 {
 		limit = 20
 	}
@@ -293,12 +358,12 @@ func (ix *Index) SearchMode(query string, limit int, mode Mode) ([]Result, error
 	}
 
 	// snippet 的第 6 个参数是片段保留 token 数（AC5：24 → 48）；
-	// bm25 权重按 docs_fts 列序给出（tags, created, source, body, path），
+	// bm25 权重按 docs_fts 列序给出（tags, created, source, body, body_bg, path），
 	// path 是 UNINDEXED 列，权重仅占位——路径相关性由 Go 侧加权处理（AC3）。
 	rows, err := ix.db.Query(`
 SELECT path,
        snippet(docs_fts, 3, '[', ']', '…', 48) AS snippet,
-       bm25(docs_fts, 10.0, 1.0, 1.0, 4.0, 0.0) AS rank
+       bm25(docs_fts, 10.0, 1.0, 1.0, 4.0, 6.0, 0.0) AS rank
 FROM docs_fts
 WHERE docs_fts MATCH ?
 ORDER BY rank
@@ -403,16 +468,94 @@ func (ix *Index) termClause(raw string) string {
 	}
 }
 
-// plainClause 把一个词（无别名展开）转成 FTS5 短语条件。
+// plainClause 把一个词（无别名展开）转成 FTS5 条件。
 //
-// 当前为批次 A 行为：沿用单字切分（与入库侧 tokenizeForFTS 一致），中文按
-// 相邻单字短语匹配。批次 B（T8）将改为「≥2 字 CJK 走 body_bg 二字组、
-// 单字走 body 列」，以消除「生，日」被 `"生 日"` 误命中的问题。
+// 按 CJK / 非 CJK 分段处理：
+//   - CJK 段长度 ≥ 2：逐**相邻二字组**生成短语条件，以 AND 连接。
+//     **绝不回落单字短语**——否则「生，日」仍会被 `"生 日"` 命中（AC6 的命门）；
+//   - CJK 段长度 = 1：单字短语条件，保证单字查询不回归（AC7）；
+//   - 非 CJK 段：原样作为词（path / tags 里的英文数字同样能命中）。
+//
+// **不限定列名**：二字组 token 只存在于 body_bg 与元数据列（混写），单字 token
+// 只存在于 body 与元数据列——两类 token 天然互不混淆，故无需写死列名；
+// 这也让 tag 里的中文能被 ≥2 字查询命中（否则会出现「部署」查不到 `tags: 部署`）。
+//
+// 各段之间以 AND 连接；多于一个条件时整体加括号，避免与外层 AND/OR 混淆。
 func plainClause(raw string) string {
-	if !hasIndexableRune(raw) {
-		return ""
+	segs := splitCJKish(raw)
+	parts := make([]string, 0, len(segs))
+	for _, seg := range segs {
+		runes := []rune(seg.text)
+		switch {
+		case seg.cjk && len(runes) >= 2:
+			grams := bigramTerms(runes)
+			if len(grams) == 0 {
+				continue
+			}
+			if len(grams) == 1 {
+				parts = append(parts, grams[0])
+				continue
+			}
+			parts = append(parts, "("+strings.Join(grams, " AND ")+")")
+		case seg.cjk:
+			parts = append(parts, `"`+escapeFTS(seg.text)+`"`)
+		default:
+			if w := strings.TrimSpace(seg.text); w != "" {
+				parts = append(parts, `"`+escapeFTS(w)+`"`)
+			}
+		}
 	}
-	return `"` + strings.ReplaceAll(tokenizeForFTS(raw), `"`, `""`) + `"`
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	default:
+		return "(" + strings.Join(parts, " AND ") + ")"
+	}
+}
+
+// cjkSegment 是查询词元按 CJK / 非 CJK 切出的一段。
+type cjkSegment struct {
+	text string
+	cjk  bool
+}
+
+// splitCJKish 把查询词元按 CJK / 非 CJK 分段，相邻同类字符合并为一段。
+func splitCJKish(s string) []cjkSegment {
+	var out []cjkSegment
+	var cur []rune
+	curCJK := false
+	flush := func() {
+		if len(cur) > 0 {
+			out = append(out, cjkSegment{text: string(cur), cjk: curCJK})
+			cur = cur[:0]
+		}
+	}
+	for _, r := range s {
+		isCJK := isCJKRune(r)
+		if len(cur) > 0 && isCJK != curCJK {
+			flush()
+		}
+		curCJK = isCJK
+		cur = append(cur, r)
+	}
+	flush()
+	return out
+}
+
+// bigramTerms 把一段 CJK 文本转成「相邻二字组」短语条件列表。
+func bigramTerms(runes []rune) []string {
+	terms := make([]string, 0, len(runes))
+	for i := 0; i+1 < len(runes); i++ {
+		terms = append(terms, `"`+escapeFTS(string(runes[i:i+2]))+`"`)
+	}
+	return terms
+}
+
+// escapeFTS 把双引号加倍，使字符串可安全嵌入 FTS5 双引号短语。
+func escapeFTS(s string) string {
+	return strings.ReplaceAll(s, `"`, `""`)
 }
 
 // hasIndexableRune 报告 s 是否含至少一个可检索字符（字母/数字/CJK）。

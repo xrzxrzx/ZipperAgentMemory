@@ -108,9 +108,14 @@ func (ix *Index) Rebuild(store *memory.Store) (int, error) {
 		count++
 	}
 
+	// 内容格式版本与索引数据同事务写入：保证「版本号」与「实际内容」不会脱节。
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", indexSchemaVersion)); err != nil {
+		return 0, fmt.Errorf("index: rebuild set user_version: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("index: rebuild commit: %w", err)
 	}
+	ix.stale = false
 	return count, nil
 }
 
@@ -136,9 +141,10 @@ ON CONFLICT(path) DO UPDATE SET
 		return fmt.Errorf("index: rebuild upsert %q fts delete: %w", path, err)
 	}
 	if _, err := tx.Exec(`
-INSERT INTO docs_fts(rowid, tags, created, source, body, path)
-VALUES (?, ?, ?, ?, ?, ?)`,
-		id, tokenizeForFTS(m.Tags), tokenizeForFTS(m.Created), tokenizeForFTS(m.Source), tokenizeForFTS(string(content)), path); err != nil {
+INSERT INTO docs_fts(rowid, tags, created, source, body, body_bg, path)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, tokenizeMetaForFTS(m.Tags), tokenizeMetaForFTS(m.Created), tokenizeMetaForFTS(m.Source),
+		tokenizeForFTS(string(content)), tokenizeBigramForFTS(string(content)), path); err != nil {
 		return fmt.Errorf("index: rebuild upsert %q fts insert: %w", path, err)
 	}
 	return nil

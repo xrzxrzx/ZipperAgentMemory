@@ -1,6 +1,8 @@
 package index
 
 import (
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -506,9 +508,8 @@ func TestRebuildIdempotent(t *testing.T) {
 // 红线基线（T1，改动前）：b.md 会被单字短语 "生 日" 误命中 → 本用例 FAIL，
 // 该 FAIL 输出即红档；批次 B（T7/T8）后转绿。
 func TestBigramPrecision(t *testing.T) {
-	// 批次 B（T7/T8）实现 body_bg 二字组后移除本 Skip 即转绿；
-	// 改动前的红档输出（b.md 被短语 "生 日" 误命中）已留档于 验收.md §1。
-	t.Skip("待批次 B 的 body_bg 二字组实现后启用")
+	// 红档（批次 A 期间）证据：查「生日」命中 notes/a.md + notes/b.md，
+	// 其中 b.md 的「生，日」被单字短语 "生 日" 误命中。原始输出见 验收.md §1。
 	ix := openTestIndex(t)
 	mustUpsert(t, ix, "notes/a.md", "我的生日是三月十日")
 	mustUpsert(t, ix, "notes/b.md", "生，日这两个字被中文逗号隔开")
@@ -610,5 +611,76 @@ func TestSnippetLength(t *testing.T) {
 	}
 	if n := len([]rune(rs[0].Snippet)); n < 40 {
 		t.Errorf("片段应达约 48 token 规模（字符数 >= 40），实际 %d 字符：%q", n, rs[0].Snippet)
+	}
+}
+
+// TestOpenMarksFreshIndex（AC8）新建空库应被标为当前版本，否则首次使用就要 rebuild。
+func TestOpenMarksFreshIndex(t *testing.T) {
+	ix := openTestIndex(t)
+	if ix.stale {
+		t.Fatal("新建空库不应被标记为 stale")
+	}
+	if _, err := ix.Search("任意", 10); err != nil {
+		t.Fatalf("空库检索不应报错：%v", err)
+	}
+}
+
+// TestIndexStaleDetection（AC8）旧版索引（user_version=0 且已有数据）必须被识别为
+// 过时：Search / Upsert 一律返回 ErrIndexStale，不得静默使用旧索引；rebuild 后恢复。
+func TestIndexStaleDetection(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "stale.sqlite")
+
+	ix, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustUpsert(t, ix, "notes/a.md", "苹果 banana")
+	ix.Close()
+
+	// 模拟旧版索引：把内容格式版本退回 0（此时 docs 表已有数据）。
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen raw: %v", err)
+	}
+	if _, err := raw.Exec("PRAGMA user_version = 0"); err != nil {
+		t.Fatalf("reset user_version: %v", err)
+	}
+	raw.Close()
+
+	ix2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open stale: %v", err)
+	}
+	defer ix2.Close()
+	if !ix2.stale {
+		t.Fatal("旧版索引应被标记为 stale")
+	}
+	if _, err := ix2.Search("苹果", 10); !errors.Is(err, ErrIndexStale) {
+		t.Fatalf("旧索引 Search 应返回 ErrIndexStale，实际 %v", err)
+	}
+	if err := ix2.Upsert("notes/b.md", Meta{}, []byte("樱桃")); !errors.Is(err, ErrIndexStale) {
+		t.Fatalf("旧索引 Upsert 应返回 ErrIndexStale，实际 %v", err)
+	}
+
+	// 准备一个真实文件供 rebuild 索引，重建后应恢复可用且版本写回。
+	if err := os.MkdirAll(filepath.Join(dir, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes", "a.md"), []byte("苹果 banana"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := memory.OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if _, err := ix2.Rebuild(store); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if ix2.stale {
+		t.Fatal("rebuild 后不应仍为 stale")
+	}
+	if got := searchPaths(t, ix2, "苹果"); !contains(got, "notes/a.md") {
+		t.Errorf("rebuild 后应可检索，实际 %v", got)
 	}
 }
