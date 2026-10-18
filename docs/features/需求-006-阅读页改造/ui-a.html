@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>方案 A · 精致工具风</title>
+<style>
+:root{
+  --bg:#f6f8fa; --panel:#ffffff; --fg:#1f2328; --dim:#59636e;
+  --border:#d8dee4; --border-soft:#eaeef2;
+  --accent:#0969da; --accent-soft:#ddf4ff; --danger:#cf222e; --danger-soft:#ffebe9;
+  --radius:8px; --shadow:0 1px 3px rgba(27,31,36,.06), 0 1px 2px rgba(27,31,36,.04);
+  --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+button{font:inherit;cursor:pointer;border-radius:6px;border:1px solid var(--border);
+  background:var(--panel);padding:6px 12px;transition:.15s}
+button:hover{background:#f3f4f6}
+.topbar{display:flex;align-items:center;gap:10px;padding:10px 18px;background:var(--panel);
+  border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5}
+.brand{font-weight:650;letter-spacing:.2px;margin-right:4px}
+.brand small{font-weight:400;color:var(--dim);font-size:12px;margin-left:6px}
+.search{display:flex;gap:8px;flex:1;min-width:0}
+.search input{flex:1;min-width:0;padding:7px 12px;border:1px solid var(--border);border-radius:6px;
+  font:inherit;background:var(--bg);transition:.15s}
+.search input:focus{outline:none;background:var(--panel);border-color:var(--accent);
+  box-shadow:0 0 0 3px rgba(9,105,218,.12)}
+.search select{padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--panel)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{background:#0860c4}
+.btn-danger{color:var(--danger);border-color:#f5c2c0}
+.btn-danger:hover{background:var(--danger-soft)}
+.layout{display:grid;grid-template-columns:290px minmax(0,1fr);gap:16px;
+  padding:16px 18px;align-items:start}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:var(--shadow)}
+.sidebar{padding:8px;position:sticky;top:70px;max-height:calc(100vh - 100px);overflow:auto}
+.side-title{font-size:11px;font-weight:650;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--dim);padding:6px 10px 4px}
+.tree{list-style:none;margin:0;padding:0}
+.tree .label{display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:6px;
+  cursor:pointer;transition:.12s}
+.tree .label:hover{background:var(--bg)}
+.tree .label.active{background:var(--accent-soft);color:#0550ae;font-weight:600}
+.tw{width:12px;color:var(--dim);font-size:10px;flex:none}
+.children{list-style:none;margin:0;padding-left:14px}
+.trash-entry{margin-top:10px;padding:10px;border-top:1px dashed var(--border);
+  display:flex;align-items:center;justify-content:space-between;gap:8px}
+.trash-entry .count{background:var(--danger-soft);color:var(--danger);border-radius:20px;
+  padding:1px 8px;font-size:12px;font-weight:600}
+.content{padding:22px 26px 40px;min-height:60vh}
+.filebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding-bottom:12px;margin-bottom:18px;border-bottom:1px solid var(--border-soft)}
+.path{font-family:var(--mono);font-size:12.5px;color:var(--dim);flex:1;word-break:break-all}
+.doc h1{font-size:24px;margin:0 0 14px;letter-spacing:-.01em}
+.doc h2{font-size:17px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--border-soft)}
+.doc p{margin:10px 0}
+.doc code{font-family:var(--mono);font-size:.9em;background:var(--bg);
+  border:1px solid var(--border-soft);padding:1px 5px;border-radius:4px}
+.doc pre{background:var(--bg);border:1px solid var(--border-soft);padding:14px;border-radius:8px;overflow:auto}
+.tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:20px;
+  background:var(--accent-soft);color:#0550ae}
+.statusbar{display:flex;gap:16px;padding:8px 18px;color:var(--dim);font-size:12px;
+  border-top:1px solid var(--border);background:var(--panel);position:sticky;bottom:0}
+/* 回收站抽屉 */
+.trash-panel{padding:22px 26px}
+.trash-head{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.trash-head h2{margin:0;font-size:18px}
+.trash-head .spacer{flex:1}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border-soft)}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);font-weight:650}
+tbody tr:hover{background:var(--bg)}
+td.path-cell{font-family:var(--mono);font-size:12.5px;color:var(--fg)}
+td.time{color:var(--dim);white-space:nowrap}
+td.ops{text-align:right;white-space:nowrap}
+td.ops button{padding:3px 9px;font-size:12px;margin-left:6px}
+.empty{text-align:center;color:var(--dim);padding:44px 0;font-size:13px}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">记忆库<small>zipper</small></div>
+  <form class="search" onsubmit="return false">
+    <input type="search" placeholder="搜索关键词（空格分隔多个）" >
+    <select><option>AND</option><option>OR</option></select>
+    <button class="btn-primary">搜索</button>
+  </form>
+  <button>回收站</button>
+  <button>退出</button>
+</header>
+
+<main class="layout">
+  <aside class="panel sidebar">
+    <div class="side-title">目录</div>
+    <ul class="tree">
+      <li class="label"><span class="tw">▾</span><span class="name">notes</span></li>
+      <li><ul class="children">
+        <li class="label active"><span class="tw"></span>学习规划.md</li>
+        <li class="label"><span class="tw"></span>go-mcp-development.md</li>
+      </ul></li>
+      <li class="label"><span class="tw">▾</span><span class="name">projects</span></li>
+      <li class="label"><span class="tw">▸</span><span class="name">structured</span></li>
+      <li class="label"><span class="tw">▾</span><span class="name">agent</span></li>
+    </ul>
+    <div class="trash-entry">
+      <span style="color:var(--dim);font-size:13px">回收站</span>
+      <span class="count">3</span>
+    </div>
+  </aside>
+
+  <section class="panel content" style="padding:0">
+    <div style="padding:22px 26px">
+      <div class="filebar">
+        <span class="path">notes/学习规划.md</span>
+        <span class="tag">学习</span>
+        <button>下载</button>
+        <button class="btn-danger">删除</button>
+      </div>
+      <div class="doc">
+        <h1>学习规划</h1>
+        <p>这是一篇示例文档，用于比较两种视觉方案的排版表现。注意行高、字号层次、
+           代码块与标签的呈现方式。</p>
+        <h2>当前阶段</h2>
+        <p>检索层已支持<b>别名扩展</b>与<b>中文二字组</b>，查询 <code>password</code>
+           能命中正文里的「密码」。</p>
+        <pre>go test -count=1 ./cmd/... ./pkg/...</pre>
+        <h2>下一步</h2>
+        <p>阅读页增加回收站与删除能力。</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="statusbar">
+  <span>271 个文件</span><span>714,963 字节</span><span>最近变更 2 分钟前</span>
+</footer>
+
+<!-- 回收站区域预览（方案 A 点「回收站」后的样子） -->
+<div class="panel trash-panel" style="margin:16px 18px">
+  <div class="trash-head">
+    <h2>回收站</h2><span class="tag">3 项</span>
+    <span class="spacer"></span>
+    <button class="btn-danger">清空回收站</button>
+  </div>
+  <table>
+    <thead><tr><th>原路径</th><th>删除时间</th><th>大小</th><th style="text-align:right">操作</th></tr></thead>
+    <tbody>
+      <tr><td class="path-cell">notes/旧笔记.md</td><td class="time">2026-10-18 20:31</td><td>2.4 KB</td>
+          <td class="ops"><button>恢复</button><button class="btn-danger">清除</button></td></tr>
+      <tr><td class="path-cell">projects/废弃方案.md</td><td class="time">2026-10-17 09:12</td><td>11.8 KB</td>
+          <td class="ops"><button>恢复</button><button class="btn-danger">清除</button></td></tr>
+      <tr><td class="path-cell">structured/servers.csv</td><td class="time">2026-10-16 14:03</td><td>0.3 KB</td>
+          <td class="ops"><button>恢复</button><button class="btn-danger">清除</button></td></tr>
+    </tbody>
+  </table>
+</div>
+</body>
+</html>

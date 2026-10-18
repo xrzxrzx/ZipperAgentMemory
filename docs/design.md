@@ -231,6 +231,7 @@ memory/                      ← 整个目录即 git 仓库
 | 目标 | 让所有者用**浏览器**随时阅读与检索记忆库（外出、临时设备场景） |
 | 入口 | `https://zipper.net.cn/memory/`（复用现有 `zipper.net.cn` 证书，不新建子域） |
 | 只读 | 仅 GET/登录相关接口；**不提供任何写接口**，写仍走 MCP / CLI |
+| 有限写（**需求-006 追加，2026-10-18**） | 仅**回收站三类动作**：软删除 / 恢复 / 清除（含清空）。**全部只接受 POST**，GET 一律 405。安全前提：Cookie 保持 `SameSite=Lax`（跨站 POST 不带凭据）+ `Origin`/`Referer` 同源校验 + 一切文件操作经 `memory.Store` 沙箱。其余写能力仍只走 MCP / CLI |
 | 覆盖范围 | **全库可读**（含 `structured/` 密码资料）——口令为唯一防线，**风险经用户知情接受**（决策 8） |
 | 暴露面 | 主域除 `/memory/` 外一律 404（含首页，保持下线）；`:80` 的 `/memory/` 301 跳 HTTPS |
 
@@ -271,6 +272,14 @@ zipper-agent-memoryd（单进程）
 | GET | `/memory/api/file?path=` | 需要 | 正文：`markdown`（渲染）/ **`csv`**（`.csv` 逗号、`.tsv` 制表符**解析为表格**：首行作表头、单元格逐个转义、超 5000 行截断并置 `truncated`、解析失败回退 `text`）/ `text`（原文）/ `binary`·`large`（仅提示下载）；内联展示上限 1 MiB |
 | GET | `/memory/api/raw?path=` | 需要 | 原始字节下载（`Content-Disposition` 按 RFC 5987 编码中文文件名） |
 | GET | `/memory/api/search?q=&mode=&limit=` | 需要 | 全文检索；`mode=and`（默认，全部命中）/`or`（任一命中）；`limit` 上限 100 |
+| GET | `/memory/api/trash` | 需要 | **需求-006**：列出回收站（`{count, entries[]{id,path,deleted_at,size}}`）；只读 |
+| POST | `/memory/api/delete` | 需要 | **需求-006**：软删除，body `{"path":"notes/a.md"}`；移入 `.trash/<批次>/<原路径>` 并从索引移除 |
+| POST | `/memory/api/restore` | 需要 | **需求-006**：恢复，body `{"id":"<批次>/<原路径>"}`；目标已存在则 409 且不覆盖 |
+| POST | `/memory/api/purge` | 需要 | **需求-006**：物理删除单条，body `{"id":"..."}` |
+| POST | `/memory/api/trash/clear` | 需要 | **需求-006**：清空回收站 |
+
+> **写接口约束（需求-006）**：上述 4 个 POST 接口对任何非 POST 请求返回 `405`（含 GET）；
+> `Origin`/`Referer` 存在且与本站不同源时返回 `403`。两者的组合是「不额外输口令」这一决定的安全前提。
 | GET | `/memory/static/*` | 需要 | 内嵌静态资源（`go:embed`，无 CDN 依赖） |
 
 未授权响应：`/memory/api/*` → 401；浏览器导航（Accept 含 `text/html`）→ 302 跳登录页；路径穿越 → 400（Linux 绝对路径亦 400，Windows 下为 404，两者都不返回根外内容）；目录路径 / 超长路径 / 含控制字符的路径 → 400；**含点分量的路径（`.git/…`、`.隐藏文件`）→ 404 且不出现在目录列表中**（2026-10-05 用户决策：阅读页不暴露点目录与点文件，含仓库内部；"." 表示根目录仍可用）。
@@ -283,6 +292,10 @@ zipper-agent-memoryd（单进程）
 4. 响应带 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`；
 5. **残余风险（用户已知情接受）**：口令即全库（含密码资料）的唯一防线。泄露应对：轮换口令 + 立即修改库内涉及的密码。
 6. 阅读页**不暴露点目录/点文件**（`.git/` 等仓库内部不可见、不可读、不可下载）；检索侧天然一致——索引本就不收录隐藏文件（`pkg/index` ShouldIndex）。
+
+7. **精确例外（需求-006）**：`.trash/`（回收站）**仅可经回收站专用接口** `GET /memory/api/trash` 列出；
+   通用 `/api/tree`、`/api/file`、`/api/raw` 与检索**仍一律不可达**。这是「接口级例外」，**不是**放宽点目录策略——
+   `.git/` 等其它点目录行为完全不变。软删除后的文件因此既不污染目录树、也不污染检索。
 
 ### 11.6 配置
 
