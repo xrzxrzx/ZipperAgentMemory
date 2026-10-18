@@ -75,6 +75,24 @@ func New(opts Options) (*Server, error) {
 	mux.Handle("GET /memory/api/file", s.protected(http.HandlerFunc(s.handleFile)))
 	mux.Handle("GET /memory/api/raw", s.protected(http.HandlerFunc(s.handleRaw)))
 	mux.Handle("GET /memory/api/search", s.protected(http.HandlerFunc(s.handleSearch)))
+	// 需求-006：回收站。读接口 GET，写接口**只接受 POST**——GET 有副作用的接口
+	// 是 CSRF 的经典入口，务必保持此约束（对方即便构造 GET 链接也只会拿到 405）。
+	mux.Handle("GET /memory/api/trash", s.protected(http.HandlerFunc(s.handleTrashList)))
+	mux.Handle("POST /memory/api/delete", s.protected(http.HandlerFunc(s.handleDelete)))
+	mux.Handle("POST /memory/api/restore", s.protected(http.HandlerFunc(s.handleRestore)))
+	mux.Handle("POST /memory/api/purge", s.protected(http.HandlerFunc(s.handlePurge)))
+	mux.Handle("POST /memory/api/trash/clear", s.protected(http.HandlerFunc(s.handleTrashClear)))
+	// GET 兜底修正：下面 `GET /memory/` 是**子树模式**，会把写接口路径的 GET 请求
+	// 抢成页面请求（最终 404），从而拿不到应有的 405。为每个写接口显式注册 GET
+	// 处理器，保证「写接口只接受 POST」这条约束可被外部观测到（需求-006 AC6）。
+	for _, p := range []string{
+		"/memory/api/delete",
+		"/memory/api/restore",
+		"/memory/api/purge",
+		"/memory/api/trash/clear",
+	} {
+		mux.Handle("GET "+p, s.protected(http.HandlerFunc(s.handleMethodNotAllowed)))
+	}
 	mux.Handle("GET /memory/static/", s.protected(http.StripPrefix("/memory/static/", s.static)))
 	mux.Handle("GET /memory/", s.protected(http.HandlerFunc(s.handleIndexPage)))
 	s.mux = mux
@@ -85,6 +103,12 @@ func New(opts Options) (*Server, error) {
 // → 安全响应头 → panic 恢复 → 路由。
 func (s *Server) Handler() http.Handler {
 	return s.logRequests(s.secureHeaders(s.recoverer(s.mux)))
+}
+
+// handleMethodNotAllowed 对写接口的非 POST 请求返回 405 并声明 Allow。
+func (s *Server) handleMethodNotAllowed(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Allow", "POST")
+	s.writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // protected 包装需口令的路由：凭据有效放行；否则浏览器导航跳登录页、

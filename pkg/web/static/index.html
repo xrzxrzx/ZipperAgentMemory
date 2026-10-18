@@ -8,20 +8,26 @@
 </head>
 <body>
 <header class="topbar">
-  <button id="home" class="ghost" title="回到根目录">记忆库</button>
-  <form id="search-form">
+  <button id="home" class="brand" title="回到根目录">记忆库<span>zipper</span></button>
+  <form id="search-form" class="search">
     <input id="q" type="search" placeholder="搜索关键词（空格分隔多个）" autocomplete="off">
     <select id="mode" title="多关键词匹配方式">
       <option value="and">全部命中 AND</option>
       <option value="or">任一命中 OR</option>
     </select>
-    <button type="submit">搜索</button>
+    <button type="submit" class="btn-primary">搜索</button>
   </form>
   <button id="logout" class="ghost">退出</button>
 </header>
 <main class="layout">
-  <aside id="sidebar" class="sidebar"></aside>
-  <section id="content" class="content">
+  <aside class="panel sidebar">
+    <div class="side-title">目录</div>
+    <div id="sidebar"></div>
+    <button id="trash-entry" class="trash-entry" hidden>
+      <span>回收站</span><span id="trash-count" class="count">0</span>
+    </button>
+  </aside>
+  <section id="content" class="panel content">
     <p class="hint">在左侧展开目录选择文件，或在上方搜索。</p>
   </section>
 </main>

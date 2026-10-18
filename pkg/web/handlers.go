@@ -345,12 +345,184 @@ func (s *Server) storeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, memory.ErrPathOutsideRoot):
 		s.writeJSONError(w, http.StatusBadRequest, "invalid path")
+	case errors.Is(err, memory.ErrTrashTargetExists):
+		s.writeJSONError(w, http.StatusConflict, "restore target already exists")
+	case errors.Is(err, memory.ErrTrashEntryNotFound):
+		s.writeJSONError(w, http.StatusNotFound, "trash entry not found")
 	case errors.Is(err, os.ErrNotExist):
 		s.writeJSONError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, index.ErrEmptyQuery):
 		s.writeJSONError(w, http.StatusBadRequest, "empty query")
+	case errors.Is(err, index.ErrIndexStale):
+		// 需求-005 的索引版本保护：明确提示而不是笼统 500（P3-d）。
+		s.writeJSONError(w, http.StatusServiceUnavailable, "index is stale, run rebuild-index")
 	default:
 		s.logf("web: %v", err)
 		s.writeJSONError(w, http.StatusInternalServerError, "internal error")
 	}
+}
+
+// ===== 需求-006：回收站（软删除 / 恢复 / 清除） =====
+
+// maxActionBody 限制写接口请求体大小（只有路径/ID，远小于此）。
+const maxActionBody = 4 << 10
+
+// sameOriginOK 校验 Origin（或 Referer）与请求 Host 同源。
+//
+// 缺失该头时**放行**：非浏览器客户端不构成 CSRF 面（CSRF 依赖浏览器自动附带凭据），
+// 而浏览器跨站 POST 已被 Cookie 的 SameSite=Lax 拦截（auth.go）。带该头但跨源
+// 一律拒绝——作为纵深防御：将来若有人误把 SameSite 放宽，这层仍然有效。
+func sameOriginOK(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}
+
+// decodeBody 解析写接口的 JSON 请求体（限制大小）；失败时已写出响应并返回 false。
+func (s *Server) decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxActionBody)).Decode(dst); err != nil {
+		s.writeJSONError(w, http.StatusBadRequest, "invalid json body")
+		return false
+	}
+	return true
+}
+
+// handleTrashList 列出回收站（只读）。
+func (s *Server) handleTrashList(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.store.ListTrash()
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	type item struct {
+		ID        string `json:"id"`
+		Path      string `json:"path"`
+		DeletedAt string `json:"deleted_at"`
+		Size      int64  `json:"size"`
+	}
+	out := make([]item, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, item{
+			ID:        e.ID,
+			Path:      e.Path,
+			DeletedAt: e.DeletedAt.Format("2006-01-02 15:04"),
+			Size:      e.Size,
+		})
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"count": len(out), "entries": out})
+}
+
+// handleDelete 软删除：把文件移入回收站，并从索引移除（检索立即不再命中）。
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginOK(r) {
+		s.writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if !s.decodeBody(w, r, &body) {
+		return
+	}
+	target := strings.TrimSpace(body.Path)
+	if target == "" {
+		s.writeJSONError(w, http.StatusBadRequest, "missing path")
+		return
+	}
+	id, err := s.store.MoveToTrash(target)
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	// 索引是派生状态：移除失败不阻断删除（下次 rebuild 会自愈），只记日志。
+	if err := s.ix.Remove(filepath.ToSlash(target)); err != nil {
+		if !errors.Is(err, index.ErrIndexStale) {
+			s.logf("web: delete %q: moved to trash but index remove failed: %v", target, err)
+		}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// handleRestore 从回收站恢复：移回原路径并重新索引。
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginOK(r) {
+		s.writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !s.decodeBody(w, r, &body) {
+		return
+	}
+	rel, err := memory.TrashOriginalPath(body.ID)
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	if err := s.store.RestoreFromTrash(body.ID); err != nil {
+		s.storeError(w, err)
+		return
+	}
+	// 重新索引：失败只记日志（索引可再生，文件已恢复是既成事实）。
+	if err := s.reindexPath(rel); err != nil {
+		s.logf("web: restore %q: restored but reindex failed: %v", body.ID, err)
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": rel})
+}
+
+// handlePurge 物理删除一条回收站条目（不可逆）。
+func (s *Server) handlePurge(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginOK(r) {
+		s.writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !s.decodeBody(w, r, &body) {
+		return
+	}
+	if err := s.store.PurgeTrash(body.ID); err != nil {
+		s.storeError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleTrashClear 清空回收站（不可逆）。
+func (s *Server) handleTrashClear(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginOK(r) {
+		s.writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	n, err := s.store.ClearTrash()
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": n})
+}
+
+// reindexPath 重新索引一个刚恢复的文件（索引是派生状态，读失败即返回错误由调用方记日志）。
+func (s *Server) reindexPath(rel string) error {
+	data, err := s.store.Read(rel)
+	if err != nil {
+		return err
+	}
+	meta, body := index.ParseFrontMatter(data)
+	if mt, err := s.store.ModTime(rel); err == nil {
+		meta.MTime = mt
+	}
+	meta.Size = int64(len(data))
+	return s.ix.Upsert(filepath.ToSlash(rel), meta, []byte(body))
 }
