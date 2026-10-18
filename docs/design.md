@@ -142,7 +142,7 @@ memory/                      ← 整个目录即 git 仓库
 | `memory_read` | `path` | readOnly | 读取文件内容（限制必须在 memory/ 内，防路径穿越） |
 | `memory_write` | `path, content, overwrite?` | destructive, idempotent | 写入/新建文件；`overwrite=false` 时存在即报错（默认） |
 | `memory_append` | `path, content` | destructive | 追加内容（agent 沉淀用，自动加时间戳分隔） |
-| `memory_search` | `query, limit?` | readOnly | FTS5 全文检索，返回 文件路径+命中片段 |
+| `memory_search` | `query, limit?, mode?` | readOnly | FTS5 全文检索；返回 `路径 (score=x): 命中片段`；路径命中词元的文件优先排序；支持别名表（见 §12） |
 | `memory_list` | `path?` | readOnly | 列出目录下的文件/子目录 |
 | `memory_status` | — | readOnly | 记忆库统计：文件数、总大小、最近变更 |
 
@@ -311,4 +311,59 @@ zipper-agent-memoryd（单进程）
 | 新增依赖 | `github.com/yuin/goldmark`（纯 Go、MIT、无 CGO，仅用于渲染） |
 | `/memory/api/file` 响应 | 新增 `kind: "csv"`（值域扩展）与 `truncated` 字段（表格行数截断标记，2026-10-05 追加 REQ-09）；CSV/TSV 解析在服务端用标准库 `encoding/csv` 完成，逐单元格 `html.EscapeString` 转义后交给前端注入 |
 | 资源 | goldmark + 内嵌静态资源约 +1–3MB，仍在 §3.3 的 60MB 红线内 |
+
+## 12. 检索实现（2026-10-18 追加：需求-005 检索质量优化）
+
+> 本章按需求-005 S2 追加（用户授权实施）。前文章节保留为历史记录、不改写；
+> 与本章冲突处以**本章为准**——尤其 §11.7 的「索引进度：**无需重建**：FTS5 表结构
+> 与单字切分方式未变」仅对需求-001 成立，**自本章起索引内容格式已变更，必须重建**。
+
+### 12.1 切分方式（`indexSchemaVersion = 2`）
+
+| 列 | 切分 | 作用 |
+|---|---|---|
+| `body` | `tokenizeForFTS`：CJK **单字**切分 | 单字查询可用（AC7 不回归） |
+| `body_bg` | `tokenizeBigramForFTS`：**相邻二字组**，标点/空白处断开 | 消除「生，日」被 `"生 日"` 误命中（AC6） |
+| `tags` / `created` / `source` | `tokenizeMetaForFTS`：单字 + 二字组**混写** | 元数据（尤其 tags）中文可被 ≥2 字查询命中 |
+| `path` | UNINDEXED | 随行存储；路径相关性由 Go 侧加权处理 |
+
+### 12.2 查询构造
+
+- 查询串按空白切词元；每个词元按 CJK / 非 CJK 分段；
+- **CJK 段 ≥ 2 字**：逐相邻二字组、以 AND 连接，**绝不回落单字短语**
+  （否则「生，日」仍被命中，精确率目标不成立）；
+- CJK 段 = 1 字：单字短语；非 CJK 段：原样作为词；
+- 条件**不限定列名**——二字组 token 只存在于 `body_bg` 与元数据列，单字 token
+  只存在于 `body` 与元数据列，两类天然不混淆；
+- 词元之间按 `mode` 以 AND / OR 连接。
+
+### 12.3 别名表（可选）
+
+`memory/meta/synonyms.tsv`：制表符分隔、组内**对称扩展**（搜任一成员命中整组）；
+文件缺失 / 坏行一律静默降级为「无别名表」（检索行为与未启用时一致）；单组 ≤10 成员；
+查询时按 stat + mtime 缓存加载，**改文件后下一次检索即生效，无需重建索引**。
+
+### 12.4 排序与分数
+
+路径命中查询词元的行优先，其次按 `-bm25(...)` 降序（Go 侧字典序排序保证 AC3）。
+`Result.Score` **仅在同一次查询内**可比较，不跨查询、不跨库。
+bm25 列权重：`tags 10 / created 1 / source 1 / body 4 / body_bg 6 / path 0`
+（path 为 UNINDEXED，权重仅占位对齐列数）。
+
+### 12.5 索引版本保护（不静默降级）
+
+`indexSchemaVersion` 与 `PRAGMA user_version` 比对：版本不符且库内已有数据 ⇒
+`Search` / `Upsert` 返回 `ErrIndexStale`，须执行 `rebuild-index`；空库在首次打开时
+自动标记为当前版本；版本号与索引数据**同事务**写入，避免版本与实际内容脱节。
+
+### 12.6 实测（2026-10-18，本机）
+
+| 指标 | 结果 | 红线 |
+|---|---|---|
+| 索引体积 | 589,824 → 692,224 字节（**1.17×**，远低于预估的 2.5–3×） | — |
+| `serve` 常驻 RSS | **20.3 MB** | < 60 MB ✅ |
+| 测试 | `go test -count=1 ./cmd/... ./pkg/...` 全绿 | — |
+
+**不引入任何新依赖；不引入向量库 / embedding** —— §3.3 的「明确避免」继续有效。
+
 

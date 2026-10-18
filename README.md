@@ -136,6 +136,34 @@ mkdir -p memory/{notes,projects,structured,agent,meta}
 
 通用 `-root <dir>`（默认 `./memory`）；`write` 另有 `-overwrite`（默认拒绝覆盖已存在文件）。
 
+### 别名表（可选，检索用）
+
+`memory/meta/synonyms.tsv`——制表符分隔，每行一组同义词，**组内对称扩展**（搜任一成员命中整组）：
+
+```tsv
+# 正词<TAB>别名1<TAB>别名2...
+密码	password	pwd
+服务器	server	servers	主机
+```
+
+模板见 `docs/templates/synonyms.tsv.example`（复制到 `memory/meta/synonyms.tsv` 即可）；
+注意 `memory/` 默认被 `.gitignore` 排除，故模板随仓库放在 `docs/templates/` 下。
+
+- UTF-8 编码；空行与 `#` 起始行忽略；有效成员少于 2 个的行视为坏行**跳过**（不报错、不影响检索）；
+- 单组成员上限 10，超出部分截断；
+- **改文件后下一次检索即生效**，无需重建索引；
+- 文件不存在 ⇒ 静默退化为「无别名表」，检索行为与未启用时完全一致；
+- 该文件本身也在记忆库内、会被索引（内容无害）。
+
+### 检索语义（中文）
+
+- 查询 **≥2 个汉字**时按**相邻二字组**匹配：「生，日」这种被标点/空白隔开的两个字**不会**被「生日」命中；
+- **单个汉字**查询走单字匹配，行为与以往一致；
+- 检索结果按「路径命中优先 → 相关性降序」排列，并返回 `score`（**仅同一次查询内可比**）。
+
+> **升级提示**：索引内容格式已变更（`indexSchemaVersion=2`）。旧索引在检索时会返回
+> 「index schema is stale」错误，执行 `rebuild-index` 即可；`serve` 启动时本就全量重建，自动对齐。
+
 ## MCP 客户端接入
 
 工具清单（全部带行为标注，`design.md §6.1`）：
@@ -145,7 +173,7 @@ mkdir -p memory/{notes,projects,structured,agent,meta}
 | `memory_read` | `path` | readOnly | 读取 memory/ 内文件（防路径穿越） |
 | `memory_write` | `path, content, overwrite?` | destructive, idempotent | 写入/新建；`overwrite=false` 时存在即报错（默认），原子覆盖 |
 | `memory_append` | `path, content` | destructive | 追加（自动时间戳分隔行）；不存在自动创建 |
-| `memory_search` | `query, limit?` | readOnly | FTS5 全文检索（中文按单字切分），返回路径+命中片段 |
+| `memory_search` | `query, limit?, mode?` | readOnly | FTS5 全文检索。返回 `路径 (score=x): [命中]片段`；`score` **仅在同一次查询内可比**；路径命中查询词的文件优先排序；支持别名表（见「配置项 → 别名表」） |
 | `memory_list` | `path?` | readOnly | 列出目录项（缺省=根目录，不递归） |
 | `memory_status` | — | readOnly | 统计：文件数/总大小/最近变更 |
 

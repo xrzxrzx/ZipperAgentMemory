@@ -1,0 +1,31 @@
+# 别名表模板（需求-005）
+#
+# 用法：复制到 <记忆库根>/meta/synonyms.tsv，即 memory/meta/synonyms.tsv。
+# 注意：memory/ 通常被 .gitignore 排除，故本模板存放在 docs/templates/ 下随仓库分发。
+#
+# 格式：制表符分隔，每行一组同义词；组内对称扩展——搜任一成员命中整组。
+# 空行与 # 起始行忽略；有效成员少于 2 的行会被跳过；单组上限 10 个成员。
+# 改本文件后下一次检索即生效，无需重建索引。
+
+# —— 凭据与账号 ——
+密码	password	pwd	口令
+账号	account	用户名	username
+凭据	credential	credentials	密钥
+
+# —— 基础设施 ——
+服务器	server	servers	主机	机器
+端口	port
+隧道	tunnel	ssh隧道
+部署	deploy	deployment	发布
+配置	config	configuration	设置
+
+# —— 记忆库自身 ——
+记忆库	memory	记忆	知识库
+检索	search	搜索	查找	query
+沉淀	distill	蒸馏	提炼
+
+# —— 开发常用 ——
+错误	error	报错	异常
+测试	test	测试用例
+规范	standard	convention	编码规范
+依赖	dependency	deps
