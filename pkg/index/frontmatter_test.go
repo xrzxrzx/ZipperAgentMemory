@@ -84,15 +84,17 @@ func TestShouldIndex(t *testing.T) {
 		{"notes/a.bin", false, false},
 		{"notes/a.png", false, false},
 		{"notes/a.pdf", false, false},
-		{".git/config", false, false},      // 隐藏目录内文件
-		{".zipper-index", false, false},    // 隐藏路径
-		{"notes/.tmp-x", false, false},     // 原子写遗留临时文件
-		{"notes/.hidden.md", false, false}, // 隐藏文件
-		{"notes", true, true},              // 目录可索引（遍历剪枝依据）
-		{".git", true, false},              // 隐藏目录剪枝
-		{"", false, false},                 // 根目录本身不索引
-		{".", false, false},                // 根目录本身不索引
-		{"notes/UPPER.MD", false, true},    // 扩展名大小写不敏感
+		{".git/config", false, false},       // 隐藏目录内文件
+		{".zipper-index", false, false},     // 隐藏路径
+		{"notes/.tmp-x", false, false},      // 原子写遗留临时文件
+		{"notes/.hidden.md", false, false},  // 隐藏文件
+		{"notes", true, true},               // 目录可索引（遍历剪枝依据）
+		{".git", true, false},               // 隐藏目录剪枝
+		{"", false, false},                  // 根目录本身不索引
+		{".", false, false},                 // 根目录本身不索引
+		{"notes/UPPER.MD", false, true},     // 扩展名大小写不敏感
+		{"meta/synonyms.tsv", false, false}, // 别名表是配置，不索引（P2-3）
+		{`meta\synonyms.tsv`, false, false}, // Windows 反斜杠形态也必须排除（P2-3 回归用例）
 	}
 	for _, tt := range tests {
 		if got := ShouldIndex(tt.rel, tt.isDir); got != tt.want {

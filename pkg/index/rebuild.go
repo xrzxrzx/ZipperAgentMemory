@@ -47,7 +47,8 @@ func ShouldIndex(rel string, isDir bool) bool {
 	}
 	// 别名表是**检索配置**而非记忆内容：不索引它，否则查同义词时
 	// `meta/synonyms.tsv` 自身常排在真实文档之前（独立验证 P2-3）。
-	if !isDir && rel == "meta/synonyms.tsv" {
+	// 注意 rel 在本平台可能是反斜杠（Windows），必须归一化后再比较。
+	if !isDir && filepath.ToSlash(rel) == "meta/synonyms.tsv" {
 		return false
 	}
 	if isDir {
