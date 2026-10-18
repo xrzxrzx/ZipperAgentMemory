@@ -497,3 +497,118 @@ func TestRebuildIdempotent(t *testing.T) {
 		t.Errorf("重建后 Remove 未生效：%v", paths)
 	}
 }
+
+// ===== 需求-005 检索质量：先红后绿基线 =====
+
+// TestBigramPrecision（AC6）查询「生日」只应命中连续出现「生日」的文件，
+// 不得命中被标点隔开的「生，日」。
+//
+// 红线基线（T1，改动前）：b.md 会被单字短语 "生 日" 误命中 → 本用例 FAIL，
+// 该 FAIL 输出即红档；批次 B（T7/T8）后转绿。
+func TestBigramPrecision(t *testing.T) {
+	// 批次 B（T7/T8）实现 body_bg 二字组后移除本 Skip 即转绿；
+	// 改动前的红档输出（b.md 被短语 "生 日" 误命中）已留档于 验收.md §1。
+	t.Skip("待批次 B 的 body_bg 二字组实现后启用")
+	ix := openTestIndex(t)
+	mustUpsert(t, ix, "notes/a.md", "我的生日是三月十日")
+	mustUpsert(t, ix, "notes/b.md", "生，日这两个字被中文逗号隔开")
+	got := searchPaths(t, ix, "生日")
+	sort.Strings(got)
+	if !sameStrings(got, []string{"notes/a.md"}) {
+		t.Fatalf("查「生日」应只命中 notes/a.md，实际命中 %v（其中 notes/b.md 为误命中）", got)
+	}
+}
+
+// TestSynonymExpansionBaseline（AC1）现状记录：正文含「密码」时，用英文
+// password 查询搜不到（别名扩展尚未实现）。
+//
+// 本用例是「特征化测试」：改动后仍应通过（未配置别名表 ⇒ 行为不变，见 AC2）；
+// 配置别名表后的正向能力见 synonyms_test.go。
+func TestSynonymExpansionBaseline(t *testing.T) {
+	ix := openTestIndex(t)
+	mustUpsert(t, ix, "notes/pwd.md", "记忆库的主密码保存在结构化目录里")
+	if got := searchPaths(t, ix, "password"); len(got) != 0 {
+		t.Fatalf("未配置别名表时 password 不应命中，实际 %v", got)
+	}
+	if got := searchPaths(t, ix, "密码"); len(got) == 0 {
+		t.Fatalf("对照项：「密码」本身应能命中，实际 0 命中")
+	}
+}
+
+// TestSynonymExpansionHit（AC1 正向）配置别名表后，英文别名可命中中文正文，
+// 组内对称扩展（中文正词同样命中）。
+func TestSynonymExpansionHit(t *testing.T) {
+	dir := t.TempDir()
+	synPath := filepath.Join(dir, "synonyms.tsv")
+	if err := os.WriteFile(synPath, []byte("# 别名表\n密码\tpassword\tpwd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Open(filepath.Join(dir, "test.sqlite"), WithSynonyms(synPath))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { ix.Close() })
+
+	mustUpsert(t, ix, "notes/pwd.md", "记忆库的主密码保存在结构化目录里")
+	for _, q := range []string{"password", "pwd", "密码"} {
+		if got := searchPaths(t, ix, q); !contains(got, "notes/pwd.md") {
+			t.Errorf("查 %q 应命中 notes/pwd.md（别名扩展），实际 %v", q, got)
+		}
+	}
+}
+
+// TestSearchPathHitFirst（AC3）路径命中应排在仅正文命中之前，即使后者正文词频更高。
+func TestSearchPathHitFirst(t *testing.T) {
+	ix := openTestIndex(t)
+	mustUpsert(t, ix, "notes/general.md", "隧道 隧道 隧道 隧道 隧道 隧道 与端口说明")
+	mustUpsert(t, ix, "notes/隧道配置.md", "隧道 与端口")
+	rs, err := ix.Search("隧道", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(rs) < 2 {
+		t.Fatalf("应至少命中 2 篇，实际 %d", len(rs))
+	}
+	if rs[0].Path != "notes/隧道配置.md" {
+		t.Errorf("路径命中的文件应排第一，实际首位 %q", rs[0].Path)
+	}
+}
+
+// TestSearchScore（AC4）结果带非零分数，且非路径优先组内按分数降序。
+func TestSearchScore(t *testing.T) {
+	ix := openTestIndex(t)
+	mustUpsert(t, ix, "notes/a.md", "苹果 苹果 苹果 苹果")
+	mustUpsert(t, ix, "notes/b.md", "苹果 香蕉 樱桃 苹果 苹果")
+	rs, err := ix.Search("苹果", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(rs) < 2 {
+		t.Fatalf("应至少命中 2 篇，实际 %d", len(rs))
+	}
+	for i, r := range rs {
+		if r.Score == 0 {
+			t.Errorf("第 %d 条分数为 0（应非零）", i)
+		}
+		if i > 0 && rs[i-1].Score < r.Score {
+			t.Errorf("分数应降序：前 %f < 后 %f", rs[i-1].Score, r.Score)
+		}
+	}
+}
+
+// TestSnippetLength（AC5）命中片段由 24 token 放宽到 48 token。
+func TestSnippetLength(t *testing.T) {
+	ix := openTestIndex(t)
+	body := strings.Repeat("前文无关铺垫内容", 20) + "关键词" + strings.Repeat("后文无关铺垫内容", 20)
+	mustUpsert(t, ix, "notes/long.md", body)
+	rs, err := ix.Search("关键词", 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(rs) != 1 {
+		t.Fatalf("应命中 1 篇，实际 %d", len(rs))
+	}
+	if n := len([]rune(rs[0].Snippet)); n < 40 {
+		t.Errorf("片段应达约 48 token 规模（字符数 >= 40），实际 %d 字符：%q", n, rs[0].Snippet)
+	}
+}

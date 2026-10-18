@@ -122,6 +122,12 @@ func resolveDBPath(rootAbs, db string) string {
 	return filepath.Join(filepath.Dir(rootAbs), ".zipper-agent-memory.index.sqlite")
 }
 
+// synonymsPath 返回记忆库内别名表的标准位置（<root>/meta/synonyms.tsv）。
+// 文件不存在时索引侧静默降级为「无别名表」，检索行为不变（需求-005 AC2）。
+func synonymsPath(rootAbs string) string {
+	return filepath.Join(rootAbs, "meta", "synonyms.tsv")
+}
+
 // openStoreIndex 打开记忆库与索引（serve/stdio 共用）。
 func openStoreIndex(root, db string) (*memory.Store, *index.Index, string, error) {
 	store, err := memory.OpenStore(root)
@@ -133,7 +139,7 @@ func openStoreIndex(root, db string) (*memory.Store, *index.Index, string, error
 		return nil, nil, "", err
 	}
 	rootAbs = filepath.Clean(rootAbs)
-	ix, err := index.Open(resolveDBPath(rootAbs, db))
+	ix, err := index.Open(resolveDBPath(rootAbs, db), index.WithSynonyms(synonymsPath(rootAbs)))
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -471,7 +477,8 @@ func cmdRebuildIndex(args []string) error {
 	if err != nil {
 		return err
 	}
-	ix, err := index.Open(resolveDBPath(filepath.Clean(rootAbs), *db))
+	rootClean := filepath.Clean(rootAbs)
+	ix, err := index.Open(resolveDBPath(rootClean, *db), index.WithSynonyms(synonymsPath(rootClean)))
 	if err != nil {
 		return err
 	}
@@ -520,7 +527,8 @@ func cmdSearch(args []string) error {
 	if err != nil {
 		return err
 	}
-	ix, err := index.Open(resolveDBPath(filepath.Clean(rootAbs), *db))
+	rootClean := filepath.Clean(rootAbs)
+	ix, err := index.Open(resolveDBPath(rootClean, *db), index.WithSynonyms(synonymsPath(rootClean)))
 	if err != nil {
 		return err
 	}
@@ -530,7 +538,7 @@ func cmdSearch(args []string) error {
 		return err
 	}
 	for _, r := range results {
-		fmt.Printf("%s: %s\n", r.Path, r.Snippet)
+		fmt.Printf("%s (score=%.2f): %s\n", r.Path, r.Score, r.Snippet)
 	}
 	fmt.Printf("%d hit(s)\n", len(results))
 	return nil

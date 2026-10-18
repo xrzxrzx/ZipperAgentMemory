@@ -284,7 +284,7 @@ func (s *Server) handleSearch(_ context.Context, req *sdk.CallToolRequest) (*sdk
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d hit(s):\n", len(results))
 	for _, r := range results {
-		fmt.Fprintf(&b, "%s: %s\n", r.Path, r.Snippet)
+		fmt.Fprintf(&b, "%s (score=%.2f): %s\n", r.Path, r.Score, r.Snippet)
 	}
 	return textResult(b.String()), nil
 }

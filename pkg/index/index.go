@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,8 +32,9 @@ type Meta struct {
 
 // Result 是 Search 的单条命中。
 type Result struct {
-	Path    string // 相对 memory/ 根的路径（正斜杠分隔）
-	Snippet string // 正文命中片段（关键词以 [ ] 高亮，中文已还原为连续字形）
+	Path    string  // 相对 memory/ 根的路径（正斜杠分隔）
+	Snippet string  // 正文命中片段（关键词以 [ ] 高亮，中文已还原为连续字形）
+	Score   float64 // 相关性分数：越大越相关；仅在**同一次查询内**可比较
 }
 
 // Index 是记忆库的 SQLite FTS5 索引。
@@ -43,8 +45,18 @@ type Result struct {
 // 不额外取 ix.mu（与写操作共享同一连接池，SQLite 内部排队）。
 // 索引是 derived state，方法不假设调用方持有任何文件锁。
 type Index struct {
-	db *sql.DB
-	mu sync.Mutex
+	db  *sql.DB
+	mu  sync.Mutex
+	syn *synonymCache // 别名表（可为 nil：未启用或不适用）
+}
+
+// Option 是 Open 的可选装配项（变参形式，保持既有 Open(dbPath) 调用不变）。
+type Option func(*Index)
+
+// WithSynonyms 启用别名扩展，别名表取自 path（通常是 memory/meta/synonyms.tsv）。
+// 文件不存在时静默降级为「无别名表」——检索行为与未启用时一致（需求-005 AC2）。
+func WithSynonyms(path string) Option {
+	return func(ix *Index) { ix.syn = &synonymCache{path: path} }
 }
 
 // schema 创建 docs 与 docs_fts 两表（幂等）。
@@ -72,13 +84,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
 
 // Open 打开（或创建）dbPath 处的索引并返回 Index。
 // 打开时确保 WAL 模式与 schema 就绪；dbPath 所在目录必须可写。
-func Open(dbPath string) (*Index, error) {
+//
+// opts 为可选装配项（见 WithSynonyms）；不传时行为与旧签名完全一致。
+func Open(dbPath string, opts ...Option) (*Index, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("index: open %q: %w", dbPath, err)
 	}
 	db.SetMaxOpenConns(1)
 	ix := &Index{db: db}
+	for _, opt := range opts {
+		opt(ix)
+	}
 	if err := ix.init(); err != nil {
 		db.Close()
 		return nil, err
@@ -259,40 +276,93 @@ func (ix *Index) SearchMode(query string, limit int, mode Mode) ([]Result, error
 	if limit <= 0 {
 		limit = 20
 	}
-	match := buildMatch(query, mode)
+	match := ix.buildMatch(query, mode)
 	if match == "" {
 		return nil, ErrEmptyQuery
 	}
 
+	const (
+		// pathBoostFactor / pathFetchCap 控制超额取行：路径命中的行可能排在
+		// bm25 靠后，只取 limit 行会漏掉（AC3），故多取后在 Go 侧排序截断。
+		pathBoostFactor = 5
+		pathFetchCap    = 200
+	)
+	fetchLimit := limit * pathBoostFactor
+	if fetchLimit > pathFetchCap {
+		fetchLimit = pathFetchCap
+	}
+
+	// snippet 的第 6 个参数是片段保留 token 数（AC5：24 → 48）；
+	// bm25 权重按 docs_fts 列序给出（tags, created, source, body, path），
+	// path 是 UNINDEXED 列，权重仅占位——路径相关性由 Go 侧加权处理（AC3）。
 	rows, err := ix.db.Query(`
-SELECT path, snippet(docs_fts, 3, '[', ']', '…', 24)
+SELECT path,
+       snippet(docs_fts, 3, '[', ']', '…', 48) AS snippet,
+       bm25(docs_fts, 10.0, 1.0, 1.0, 4.0, 0.0) AS rank
 FROM docs_fts
 WHERE docs_fts MATCH ?
 ORDER BY rank
-LIMIT ?`, match, limit)
+LIMIT ?`, match, fetchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("index: search %q: %w", query, err)
 	}
 	defer rows.Close()
 
-	var out []Result
+	terms := strings.Fields(query)
+	type scored struct {
+		Result
+		pathHit bool
+	}
+	var hits []scored
 	for rows.Next() {
-		var r Result
-		if err := rows.Scan(&r.Path, &r.Snippet); err != nil {
+		var (
+			s    scored
+			rank float64
+		)
+		if err := rows.Scan(&s.Path, &s.Snippet, &rank); err != nil {
 			return nil, fmt.Errorf("index: search scan: %w", err)
 		}
-		r.Snippet = untokenizeSnippet(r.Snippet)
-		out = append(out, r)
+		s.Snippet = untokenizeSnippet(s.Snippet)
+		s.Score = -rank // bm25 返回负值且越小越相关，取反后「越大越相关」
+		s.pathHit = pathMatches(s.Path, terms)
+		hits = append(hits, s)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("index: search rows: %w", err)
 	}
+
+	// 路径命中优先（AC3），同组内按相关性降序；稳定排序保证同分顺序确定。
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].pathHit != hits[j].pathHit {
+			return hits[i].pathHit
+		}
+		return hits[i].Score > hits[j].Score
+	})
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	out := make([]Result, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.Result)
+	}
 	return out, nil
+}
+
+// pathMatches 报告 path 是否包含任一词元（大小写不敏感）。路径即"标题"，
+// 命中视为强相关信号，用于 AC3 的优先排序。
+func pathMatches(path string, terms []string) bool {
+	lower := strings.ToLower(path)
+	for _, t := range terms {
+		if t = strings.ToLower(strings.TrimSpace(t)); t != "" && strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildMatch 把用户查询构造成 FTS5 MATCH 表达式：按空白切分词元，逐词元
 // 单字切分并包成双引号短语，再按 mode 用 AND / OR 连接；无有效词元时返回空串。
-func buildMatch(query string, mode Mode) string {
+func (ix *Index) buildMatch(query string, mode Mode) string {
 	sep := " AND "
 	if mode == ModeOR {
 		sep = " OR "
@@ -302,9 +372,47 @@ func buildMatch(query string, mode Mode) string {
 		if !hasIndexableRune(raw) {
 			continue // 纯标点词元在 FTS5 里不产生 token，包成短语会触发语法错误
 		}
-		terms = append(terms, `"`+strings.ReplaceAll(tokenizeForFTS(raw), `"`, `""`)+`"`)
+		terms = append(terms, ix.termClause(raw))
 	}
 	return strings.Join(terms, sep)
+}
+
+// termClause 生成单个词元的 FTS5 条件。
+//
+// 别名扩展（AC1）：词元命中别名表时，展开为该组全部成员条件的 OR 组，
+// 整组作为**一个**词元条件参与外层 AND/OR——保证「词元之间」的语义不被
+// 别名打乱（例如 `隧道 端口` 不会因别名退化成全部 OR）。
+func (ix *Index) termClause(raw string) string {
+	group := ix.syn.expansions(raw)
+	if len(group) == 0 {
+		return plainClause(raw)
+	}
+	parts := make([]string, 0, len(group))
+	for _, member := range group {
+		if c := plainClause(member); c != "" {
+			parts = append(parts, c)
+		}
+	}
+	switch len(parts) {
+	case 0:
+		return plainClause(raw)
+	case 1:
+		return parts[0]
+	default:
+		return "(" + strings.Join(parts, " OR ") + ")"
+	}
+}
+
+// plainClause 把一个词（无别名展开）转成 FTS5 短语条件。
+//
+// 当前为批次 A 行为：沿用单字切分（与入库侧 tokenizeForFTS 一致），中文按
+// 相邻单字短语匹配。批次 B（T8）将改为「≥2 字 CJK 走 body_bg 二字组、
+// 单字走 body 列」，以消除「生，日」被 `"生 日"` 误命中的问题。
+func plainClause(raw string) string {
+	if !hasIndexableRune(raw) {
+		return ""
+	}
+	return `"` + strings.ReplaceAll(tokenizeForFTS(raw), `"`, `""`) + `"`
 }
 
 // hasIndexableRune 报告 s 是否含至少一个可检索字符（字母/数字/CJK）。

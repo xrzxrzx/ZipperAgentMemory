@@ -284,8 +284,9 @@ func (s *Server) pathIsDir(rel string) bool {
 
 // searchHit 是单条命中。
 type searchHit struct {
-	Path    string `json:"path"`
-	Snippet string `json:"snippet"`
+	Path    string  `json:"path"`
+	Snippet string  `json:"snippet"`
+	Score   float64 `json:"score"` // 相关性分数：越大越相关；仅同一查询内可比
 }
 
 // searchResponse 是 /memory/api/search 的响应体。
@@ -323,7 +324,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := searchResponse{Mode: mode.String(), Count: len(results), Hits: make([]searchHit, 0, len(results))}
 	for _, hit := range results {
-		resp.Hits = append(resp.Hits, searchHit{Path: hit.Path, Snippet: hit.Snippet})
+		resp.Hits = append(resp.Hits, searchHit{Path: hit.Path, Snippet: hit.Snippet, Score: hit.Score})
 	}
 	s.writeJSON(w, http.StatusOK, resp)
 }
