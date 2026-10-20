@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,10 +40,11 @@ type Entry struct {
 
 // Manifest 是 /api/list 的响应体。
 type Manifest struct {
-	Root    string  `json:"root"`
-	Count   int     `json:"count"`
-	Updated string  `json:"updated"`
-	Entries []Entry `json:"entries"`
+	Root     string  `json:"root"`
+	Count    int     `json:"count"`
+	Updated  string  `json:"updated"`
+	Scanning bool    `json:"scanning"` // true 表示后台正在扫描，当前快照可能不完整
+	Entries  []Entry `json:"entries"`
 }
 
 // cacheItem 是 sha256 缓存项（键为资源 ID）。
@@ -67,6 +69,10 @@ type server struct {
 	cachePath string
 	mu        sync.Mutex
 	cache     map[string]cacheItem
+	// snapshot 是最近一次完成的扫描结果；/api/list 只读它，**从不阻塞在扫描上**。
+	// 资源区可能几十 GB，同步扫描会让请求挂死（首版实测 180s 超时）。
+	snapshot atomic.Pointer[Manifest]
+	scanning atomic.Bool
 }
 
 func main() {
@@ -89,6 +95,10 @@ func main() {
 	s := &server{root: absRoot, cachePath: *cachePath, cache: map[string]cacheItem{}}
 	s.loadCache()
 
+	// 后台扫描：首次可能较慢（需要为新增的大文件计算 sha256），之后命中缓存只做
+	// stat + 比对。**扫描与请求解耦**，/api/list 始终立即返回最近快照。
+	go s.refreshLoop(5 * time.Minute)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/list", s.handleList)
@@ -109,20 +119,42 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleList 扫描 root 并返回清单。sha256 走缓存，只有 (size, mtime) 变化才重算。
+// handleList 返回**最近一次完成的扫描快照**，立即响应、绝不阻塞在扫描上。
+//
+// `scanning: true` 表示后台正在扫描（首次启动或刚有大量新增文件时），
+// 此时 entries 可能是上一轮的旧数据或为空，调用方可稍后重试。
 func (s *server) handleList(w http.ResponseWriter, _ *http.Request) {
-	entries, err := s.scan()
-	if err != nil {
-		log.Printf("resources: scan: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan failed"})
+	m := s.snapshot.Load()
+	if m == nil {
+		writeJSON(w, http.StatusOK, Manifest{
+			Root: s.root, Count: 0, Updated: "", Scanning: true, Entries: []Entry{},
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, Manifest{
-		Root:    s.root,
-		Count:   len(entries),
-		Updated: time.Now().Format(time.RFC3339),
-		Entries: entries,
-	})
+	out := *m
+	out.Scanning = s.scanning.Load()
+	writeJSON(w, http.StatusOK, out)
+}
+
+// refreshLoop 周期性执行扫描并替换快照；首轮在启动后立即开始。
+func (s *server) refreshLoop(every time.Duration) {
+	for {
+		s.scanning.Store(true)
+		entries, err := s.scan()
+		if err != nil {
+			log.Printf("resources: scan failed: %v", err)
+		} else {
+			s.snapshot.Store(&Manifest{
+				Root:    s.root,
+				Count:   len(entries),
+				Updated: time.Now().Format(time.RFC3339),
+				Entries: entries,
+			})
+			log.Printf("resources: scan done: %d entries", len(entries))
+		}
+		s.scanning.Store(false)
+		time.Sleep(every)
+	}
 }
 
 // handleFile 只读地返回单个资源。路径必须落在 root 内（拒绝穿越）。
@@ -183,7 +215,11 @@ func (s *server) scan() ([]Entry, error) {
 		id := filepath.ToSlash(rel)
 		sum, err := s.hashFor(p, id, fi)
 		if err != nil {
-			return err
+			// 单个文件不可读（例如正在被 scp 写入、被占用、权限不足）**不应让整张
+			// 清单失败**：跳过它并记日志，下次扫描（size/mtime 变化）会自动补上。
+			// 否则一次大文件传输就会让 /api/list 持续 500。
+			log.Printf("resources: skip %q: %v", id, err)
+			return nil
 		}
 		entries = append(entries, Entry{
 			ID:     id,
