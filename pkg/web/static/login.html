@@ -3,69 +3,152 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>记忆库 · 登录</title>
 <!--
   样式内联在页面里：登录页是**公开**路由，而 /memory/static/* 需要口令
   （design.md §11.4），外链样式表会被 401 拦掉，导致登录页裸奔。
   与下方脚本内联同一理由。
+  视觉：需求-007 Fluent 暗色（与主页面同一套令牌，此处按需精简内联）。
 -->
 <style>
   :root {
-    --fg: #1f2328;
-    --fg-dim: #656d76;
-    --bg: #ffffff;
-    --bg-soft: #f6f8fa;
-    --border: #d0d7de;
-    --accent: #0969da;
+    color-scheme: dark;
+    --bg-base: #1f1f1f;
+    --layer: #272727;
+    --input: #2b2b2b;
+    --stroke: rgba(255, 255, 255, .08);
+    --stroke-control: rgba(255, 255, 255, .09);
+    --text: rgba(255, 255, 255, .96);
+    --text-2: rgba(255, 255, 255, .62);
+    --text-3: rgba(255, 255, 255, .52);
+    --accent: #60cdff;
+    --accent-hover: #7fd8ff;
+    --on-accent: #002b4d;
+    --danger: #ff99a4;
+    --radius-panel: 8px;
+    --radius-ctl: 4px;
+    --shadow-8: 0 8px 16px rgba(0, 0, 0, .38), 0 0 1px rgba(0, 0, 0, .28);
+    --motion: 150ms cubic-bezier(.13, .79, .32, 1);
+    --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", sans-serif;
   }
+
   * { box-sizing: border-box; }
+
   body {
     margin: 0;
-    color: var(--fg);
-    background: var(--bg-soft);
-    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 100vh;
+    padding: 24px;
+    color: var(--text);
+    background:
+      radial-gradient(1100px 560px at 6% -12%, rgba(96, 205, 255, .10), transparent 62%),
+      radial-gradient(900px 520px at 102% -6%, rgba(140, 120, 255, .07), transparent 58%),
+      var(--bg-base);
+    font: 14px/1.6 var(--font);
+    -webkit-font-smoothing: antialiased;
   }
+
   .login-card {
-    width: min(360px, 92vw);
-    padding: 28px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--bg);
+    width: min(380px, 100%);
+    padding: 32px;
+    border: 1px solid var(--stroke);
+    border-radius: var(--radius-panel);
+    background: var(--layer);
+    box-shadow: var(--shadow-8);
   }
-  .login-card h1 { margin: 0 0 6px; font-size: 20px; }
-  .login-card .hint { color: var(--fg-dim); margin: 0; }
-  .login-card form { display: flex; gap: 8px; margin-top: 14px; }
-  .login-card input {
+  @supports (backdrop-filter: blur(1px)) {
+    .login-card {
+      background: rgba(255, 255, 255, .05);
+      backdrop-filter: blur(30px) saturate(150%);
+    }
+  }
+
+  .login-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 18px;
+    color: var(--accent);
+  }
+  .login-brand svg { width: 26px; height: 26px; }
+  .login-brand span {
+    color: var(--text-3);
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    border-left: 1px solid rgba(255, 255, 255, .14);
+    padding-left: 10px;
+  }
+
+  h1 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
+  .hint { margin: 0; color: var(--text-2); }
+
+  form { display: flex; gap: 8px; margin-top: 18px; }
+
+  input {
     flex: 1;
     min-width: 0;
-    padding: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    height: 34px;
+    padding: 4px 10px;
+    border: 1px solid var(--stroke-control);
+    border-bottom: 2px solid rgba(255, 255, 255, .22);
+    border-radius: var(--radius-ctl);
+    background: var(--input);
+    color: var(--text);
     font: inherit;
+    transition: border-color var(--motion), background var(--motion);
   }
-  .login-card button {
-    padding: 8px 14px;
-    border: 1px solid var(--accent);
-    border-radius: 6px;
+  input::placeholder { color: var(--text-3); }
+  input:hover { background: #303030; }
+  input:focus {
+    outline: none;
+    border-bottom-color: var(--accent);
+    background: #2f2f2f;
+  }
+
+  button {
+    min-height: 34px;
+    padding: 0 16px;
+    border: none;
+    border-radius: var(--radius-ctl);
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     font: inherit;
+    font-weight: 600;
     cursor: pointer;
+    transition: background var(--motion);
   }
-  .login-card button[disabled] { opacity: 0.6; cursor: default; }
-  .error { color: #cf222e; min-height: 1.2em; margin: 10px 0 0; }
+  button:hover { background: var(--accent-hover); }
+  button:disabled { opacity: .55; cursor: default; }
+
+  :where(button, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .error { color: var(--danger); min-height: 1.2em; margin: 10px 0 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
 </style>
 </head>
-<body class="login-body">
+<body>
 <main class="login-card">
+  <div class="login-brand">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M8 2.2 13.4 5 8 7.8 2.6 5 8 2.2Z"/>
+      <path d="M2.6 8 8 10.8 13.4 8"/>
+      <path d="M2.6 11 8 13.8 13.4 11"/>
+    </svg>
+    <span>zipper memory</span>
+  </div>
   <h1>记忆库</h1>
   <p class="hint">输入访问口令（长期有效，只需输一次）</p>
   <form id="login-form">
-    <input id="token" type="password" autocomplete="current-password" placeholder="访问口令" required autofocus>
+    <input id="token" type="password" autocomplete="current-password" placeholder="访问口令" required autofocus
+           aria-label="访问口令">
     <button type="submit" id="submit">进入</button>
   </form>
   <p id="msg" class="error" role="alert"></p>

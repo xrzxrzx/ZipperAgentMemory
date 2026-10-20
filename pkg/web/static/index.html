@@ -3,34 +3,74 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 让浏览器原生控件（滚动条、下拉框、日期选择等）也用暗色渲染 -->
+<meta name="color-scheme" content="dark">
 <title>记忆库</title>
 <link rel="stylesheet" href="/memory/static/style.css">
 </head>
 <body>
 <header class="topbar">
-  <button id="home" class="brand" title="回到根目录">记忆库<span>zipper</span></button>
+  <button id="home" class="brand" title="回到根目录" aria-label="回到记忆库根目录">
+    <svg class="brand-mark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M8 2.2 13.4 5 8 7.8 2.6 5 8 2.2Z"/>
+      <path d="M2.6 8 8 10.8 13.4 8"/>
+      <path d="M2.6 11 8 13.8 13.4 11"/>
+    </svg>
+    <span class="brand-text">记忆库</span>
+    <span class="brand-sub">zipper</span>
+  </button>
+
   <form id="search-form" class="search">
-    <input id="q" type="search" placeholder="搜索关键词（空格分隔多个）" autocomplete="off">
-    <select id="mode" title="多关键词匹配方式">
+    <div class="search-field">
+      <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+           stroke-linecap="round" aria-hidden="true">
+        <circle cx="7" cy="7" r="4.2"/>
+        <path d="m10.2 10.2 3 3"/>
+      </svg>
+      <input id="q" type="search" placeholder="搜索关键词（空格分隔多个）" autocomplete="off"
+             aria-label="搜索关键词">
+    </div>
+    <select id="mode" title="多关键词匹配方式" aria-label="多关键词匹配方式">
       <option value="and">全部命中 AND</option>
       <option value="or">任一命中 OR</option>
     </select>
     <button type="submit" class="btn-primary">搜索</button>
   </form>
-  <button id="logout" class="ghost">退出</button>
+
+  <button id="logout" class="ghost btn-icon" title="退出登录" aria-label="退出登录">
+    <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M9.5 3H4.2A1.2 1.2 0 0 0 3 4.2v7.6A1.2 1.2 0 0 0 4.2 13h5.3"/>
+      <path d="M10.5 5.5 13 8l-2.5 2.5"/>
+      <path d="M13 8H7"/>
+    </svg>
+  </button>
 </header>
+
 <main class="layout">
   <aside class="panel sidebar">
     <div class="side-title">目录</div>
     <div id="sidebar"></div>
     <button id="trash-entry" class="trash-entry" hidden>
-      <span>回收站</span><span id="trash-count" class="count">0</span>
+      <span class="trash-entry-label">
+        <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 4.5h10"/>
+          <path d="M6.2 4.5V3.2h3.6v1.3"/>
+          <path d="M4.4 4.5 5 12.6a1.2 1.2 0 0 0 1.2 1.1h3.6a1.2 1.2 0 0 0 1.2-1.1l.6-8.1"/>
+        </svg>
+        回收站
+      </span>
+      <span id="trash-count" class="count">0</span>
     </button>
   </aside>
+
   <section id="content" class="panel content">
     <p class="hint">在左侧展开目录选择文件，或在上方搜索。</p>
   </section>
 </main>
+
 <footer class="statusbar"><span id="status">加载中…</span></footer>
 <script src="/memory/static/app.js"></script>
 </body>
