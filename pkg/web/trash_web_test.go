@@ -216,3 +216,45 @@ func TestTrashDeleteOutsideRootRejected(t *testing.T) {
 		t.Fatalf("越界删除 = %d, want 400；body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestTrashDeleteDirectory 目录连同其全部内容进回收站，可整体恢复（A 方案）。
+func TestTrashDeleteDirectory(t *testing.T) {
+	srv, root := newTrashServer(t)
+	if err := os.WriteFile(filepath.Join(root, "notes", "b.md"), []byte("# B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := trashReq(srv, http.MethodPost, "/memory/api/delete", map[string]string{"path": "notes"}, "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete dir = %d, want 200；body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes")); !os.IsNotExist(err) {
+		t.Fatal("目录应已整体移走")
+	}
+
+	rec = trashReq(srv, http.MethodGet, "/memory/api/trash", nil, "", true)
+	var list struct {
+		Count   int `json:"count"`
+		Entries []struct {
+			ID string `json:"id"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("解析回收站: %v", err)
+	}
+	if list.Count != 2 {
+		t.Fatalf("回收站应含 2 个文件，实际 %d", list.Count)
+	}
+
+	// 用目录条目（id 形如 <批次>/notes）整体恢复
+	dirID := strings.Split(list.Entries[0].ID, "/")[0] + "/notes"
+	rec = trashReq(srv, http.MethodPost, "/memory/api/restore", map[string]string{"id": dirID}, "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore dir = %d, want 200；body=%s", rec.Code, rec.Body.String())
+	}
+	for _, n := range []string{"a.md", "b.md"} {
+		if _, err := os.Stat(filepath.Join(root, "notes", n)); err != nil {
+			t.Errorf("恢复后 %s 应存在: %v", n, err)
+		}
+	}
+}

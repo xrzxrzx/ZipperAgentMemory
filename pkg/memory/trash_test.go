@@ -150,10 +150,54 @@ func TestMoveToTrashRejectsOutsideRoot(t *testing.T) {
 	}
 }
 
-// TestMoveToTrashRejectsDir 目录不能软删除（本轮只做单文件）。
-func TestMoveToTrashRejectsDir(t *testing.T) {
-	s, _ := trashFixture(t)
-	if _, err := s.MoveToTrash("notes"); err == nil {
-		t.Fatal("目录不应被软删除")
+// TestMoveToTrashDirectory 目录连同其全部内容整体进回收站；恢复后原样回来。
+func TestMoveToTrashDirectory(t *testing.T) {
+	s, root := trashFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "notes", "b.md"), []byte("b content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.MoveToTrash("notes")
+	if err != nil {
+		t.Fatalf("MoveToTrash(dir): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes")); !os.IsNotExist(err) {
+		t.Fatal("目录应已整体移走")
+	}
+	entries, err := s.ListTrash()
+	if err != nil {
+		t.Fatalf("ListTrash: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("回收站应含 2 个文件（a.md/b.md），实际 %d", len(entries))
+	}
+	if err := s.RestoreFromTrash(id); err != nil {
+		t.Fatalf("Restore(dir): %v", err)
+	}
+	for _, n := range []string{"a.md", "b.md"} {
+		if _, err := os.Stat(filepath.Join(root, "notes", n)); err != nil {
+			t.Errorf("恢复后 %s 应存在: %v", n, err)
+		}
+	}
+}
+
+// TestWalkFiles 递归列出目录下全部文件；传单文件时返回自身。
+func TestWalkFiles(t *testing.T) {
+	s, root := trashFixture(t)
+	if err := os.MkdirAll(filepath.Join(root, "notes", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes", "sub", "c.md"), []byte("c"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.WalkFiles("notes")
+	if err != nil {
+		t.Fatalf("WalkFiles: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("应列出 2 个文件，实际 %v", got)
+	}
+	single, err := s.WalkFiles("notes/a.md")
+	if err != nil || len(single) != 1 || single[0] != "notes/a.md" {
+		t.Fatalf("单文件应返回自身，实际 %v err=%v", single, err)
 	}
 }

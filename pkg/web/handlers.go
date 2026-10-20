@@ -421,7 +421,10 @@ func (s *Server) handleTrashList(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"count": len(out), "entries": out})
 }
 
-// handleDelete 软删除：把文件移入回收站，并从索引移除（检索立即不再命中）。
+// handleDelete 软删除：把**文件或目录**移入回收站，并同步清理索引。
+//
+// 目录会连同其全部内容一起搬走；索引侧用 RemovePrefix 清空整棵子树，
+// 否则会残留「幽灵条目」（文件已不在、检索仍命中）。
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if !sameOriginOK(r) {
 		s.writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
@@ -438,21 +441,30 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		s.writeJSONError(w, http.StatusBadRequest, "missing path")
 		return
 	}
+	// 先判断类型：目录需要按前缀清理索引。
+	isDir, err := s.store.IsDir(target)
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
 	id, err := s.store.MoveToTrash(target)
 	if err != nil {
 		s.storeError(w, err)
 		return
 	}
-	// 索引是派生状态：移除失败不阻断删除（下次 rebuild 会自愈），只记日志。
-	if err := s.ix.Remove(filepath.ToSlash(target)); err != nil {
-		if !errors.Is(err, index.ErrIndexStale) {
-			s.logf("web: delete %q: moved to trash but index remove failed: %v", target, err)
+	// 索引是派生状态：清理失败不阻断删除（下次 rebuild 会自愈），只记日志。
+	rel := filepath.ToSlash(target)
+	if isDir {
+		if _, err := s.ix.RemovePrefix(rel); err != nil && !errors.Is(err, index.ErrIndexStale) {
+			s.logf("web: delete dir %q: moved to trash but index prefix remove failed: %v", target, err)
 		}
+	} else if err := s.ix.Remove(rel); err != nil && !errors.Is(err, index.ErrIndexStale) {
+		s.logf("web: delete %q: moved to trash but index remove failed: %v", target, err)
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "dir": isDir})
 }
 
-// handleRestore 从回收站恢复：移回原路径并重新索引。
+// handleRestore 从回收站恢复：移回原路径并重新索引（目录则逐个文件重建）。
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if !sameOriginOK(r) {
 		s.writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
@@ -473,11 +485,18 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, err)
 		return
 	}
-	// 重新索引：失败只记日志（索引可再生，文件已恢复是既成事实）。
-	if err := s.reindexPath(rel); err != nil {
-		s.logf("web: restore %q: restored but reindex failed: %v", body.ID, err)
+	// 重新索引：目录要遍历其下全部文件；失败只记日志（索引可再生，文件已恢复是既成事实）。
+	files, walkErr := s.store.WalkFiles(rel)
+	if walkErr != nil {
+		s.logf("web: restore %q: restored but walk failed: %v", body.ID, walkErr)
+	} else {
+		for _, f := range files {
+			if err := s.reindexPath(f); err != nil {
+				s.logf("web: restore %q: reindex %q failed: %v", body.ID, f, err)
+			}
+		}
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": rel})
+	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": rel, "files": len(files)})
 }
 
 // handlePurge 物理删除一条回收站条目（不可逆）。

@@ -32,21 +32,20 @@ type TrashEntry struct {
 	Size      int64     // 字节数
 }
 
-// MoveToTrash 把 rel 指向的文件移入回收站，返回条目 ID。
+// MoveToTrash 把 rel 指向的**文件或目录**移入回收站，返回条目 ID。
+//
+// 目录会**连同其全部内容**整体搬进 `.trash/<批次>/<原路径>`——同一卷内 rename，
+// 不复制数据；恢复时整棵树原样回来。
 //
 // 目录结构：`.trash/<YYYYMMDD-HHMMSS>/<原相对路径>`——一次删除一个批次，
-// 同名文件跨批次不冲突，恢复只需取批次下的相对路径。
+// 同名条目跨批次不冲突，恢复只需取批次下的相对路径。
 func (s *Store) MoveToTrash(rel string) (string, error) {
 	src, err := s.resolve(rel) // 沙箱校验：越界一律 ErrPathOutsideRoot
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(src)
-	if err != nil {
+	if _, err := os.Stat(src); err != nil {
 		return "", fmt.Errorf("memory: trash %q: %w", rel, err)
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("memory: trash %q: is a directory", rel)
 	}
 
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
@@ -190,6 +189,44 @@ func (s *Store) ClearTrash() (int, error) {
 	}
 	_ = os.Remove(filepath.Join(s.root, trashDir)) // 只剩空目录时一并清掉
 	return n, nil
+}
+
+// WalkFiles 返回 rel（文件或目录）下所有文件的相对路径（正斜杠，递归）。
+//
+// rel 是文件时返回自身；是目录时返回其子树内全部文件。用于「删除/恢复目录」
+// 后同步索引——索引是派生状态，必须与磁盘一致。路径一律经沙箱校验。
+func (s *Store) WalkFiles(rel string) ([]string, error) {
+	abs, err := s.resolve(rel)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, fmt.Errorf("memory: walk %q: %w", rel, err)
+	}
+	if !info.IsDir() {
+		return []string{filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))}, nil
+	}
+
+	out := make([]string, 0, 16)
+	walkErr := filepath.WalkDir(abs, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		relPath, err := filepath.Rel(s.root, p)
+		if err != nil {
+			return err
+		}
+		out = append(out, filepath.ToSlash(relPath))
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("memory: walk %q: %w", rel, walkErr)
+	}
+	return out, nil
 }
 
 // TrashOriginalPath 从条目 ID 中取出原相对路径（正斜杠）。**不做文件系统访问**，

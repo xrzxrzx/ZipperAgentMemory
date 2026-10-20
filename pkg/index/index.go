@@ -223,6 +223,49 @@ func (ix *Index) Close() error {
 	return nil
 }
 
+// RemovePrefix 删除 prefix 本身及其下所有文件的索引记录，返回删除条数。
+//
+// 用途：整个目录被移入回收站/被删除后，索引必须同步清空该子树——否则会残留
+// 「幽灵条目」（文件已不在，检索仍命中）。用 substr 精确比较前缀，避免 LIKE
+// 的通配符（`%` `_`）转义问题。
+func (ix *Index) RemovePrefix(prefix string) (int, error) {
+	if prefix == "" {
+		return 0, nil
+	}
+	if ix.stale.Load() {
+		return 0, ErrIndexStale
+	}
+	under := prefix + "/"
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+
+	tx, err := ix.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("index: remove prefix begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+DELETE FROM docs_fts WHERE rowid IN (
+	SELECT id FROM docs WHERE path = ?1 OR substr(path, 1, ?2) = ?3
+)`, prefix, len(under), under); err != nil {
+		return 0, fmt.Errorf("index: remove prefix %q fts: %w", prefix, err)
+	}
+	res, err := tx.Exec(`DELETE FROM docs WHERE path = ?1 OR substr(path, 1, ?2) = ?3`,
+		prefix, len(under), under)
+	if err != nil {
+		return 0, fmt.Errorf("index: remove prefix %q docs: %w", prefix, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("index: remove prefix %q rows: %w", prefix, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("index: remove prefix commit: %w", err)
+	}
+	return int(n), nil
+}
+
 // Upsert 写入（或覆盖）path 的索引记录，content 为文件正文（已去 front-matter）。
 // path 是相对 memory/ 根的正斜杠路径。幂等：重复调用同一 path 以最新内容为准。
 func (ix *Index) Upsert(path string, m Meta, content []byte) error {

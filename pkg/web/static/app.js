@@ -86,6 +86,14 @@ function nodeFor(entry, parent) {
     const children = el('ul', 'children');
     children.hidden = true;
     label.addEventListener('click', () => toggleDir(li, children, joinPath(parent, entry.name)));
+    // 目录也可删除（连同全部内容进回收站）——hover 时才显现，避免误点。
+    const dirDel = el('button', 'dir-del', '×');
+    dirDel.title = '删除整个目录（移入回收站，可恢复）';
+    dirDel.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      deleteEntry(joinPath(parent, entry.name), true);
+    });
+    label.appendChild(dirDel);
     li.append(label, children);
   } else {
     label.addEventListener('click', () => {
@@ -196,20 +204,28 @@ async function openFile(path) {
 
 // ---- 删除 / 回收站 ----
 
-async function deleteFile(path) {
-  if (!window.confirm('把「' + path + '」移入回收站？\n\n文件不会被真正删除，可随时从回收站恢复。')) {
+// deleteEntry 软删除：文件，或**目录（连同其全部内容）**移入回收站。
+async function deleteEntry(path, isDir) {
+  const what = isDir ? '目录「' + path + '/」及其全部内容' : '「' + path + '」';
+  if (!window.confirm('把' + what + '移入回收站？\n\n不会被真正删除，可随时从回收站恢复。')) {
     return;
   }
   try {
     await apiPost('/memory/api/delete', { path });
     currentPath = '';
-    contentEl.replaceChildren(el('p', 'hint', '已移入回收站：' + path));
-    showStatus('已移入回收站：' + path);
+    const msg = '已移入回收站：' + path + (isDir ? '/' : '');
+    contentEl.replaceChildren(el('p', 'hint', msg));
+    showStatus(msg);
     await loadRoot();
     await refreshTrashCount();
   } catch (err) {
     showError(err);
   }
+}
+
+// deleteFile 保留为「文件」场景的便捷入口。
+function deleteFile(path) {
+  return deleteEntry(path, false);
 }
 
 async function refreshTrashCount() {
