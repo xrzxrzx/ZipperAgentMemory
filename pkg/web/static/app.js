@@ -246,7 +246,7 @@ function renderTrashView(entries) {
   const spacer = el('span', 'spacer');
   head.appendChild(spacer);
   const back = el('button', 'action', '← 返回');
-  back.addEventListener('click', () => { location.hash = ''; });
+  back.addEventListener('click', showBrowse);
   head.appendChild(back);
   if (entries.length > 0) {
     const clear = el('button', 'action danger', '清空回收站');
@@ -384,6 +384,28 @@ async function runSearch(query) {
 
 // ---- 视图路由（#trash = 回收站子页） ----
 
+// showTrash 切到回收站视图。
+//
+// 注意：**给 location.hash 赋一个相同的值不会触发 hashchange**。若用户已在
+// `#trash`（例如刚清空/返回后又点一次），只设 hash 会导致"点了没反应"。
+// 因此这里在 hash 相同的情况下直接重新渲染。
+function showTrash() {
+  if (location.hash === '#trash') {
+    openTrash();
+    return;
+  }
+  location.hash = '#trash'; // 触发 hashchange → renderHashView
+}
+
+// showBrowse 回到浏览视图；同样处理「hash 已经是空」的情况。
+function showBrowse() {
+  if (location.hash === '') {
+    renderHashView();
+    return;
+  }
+  location.hash = ''; // 触发 hashchange
+}
+
 function renderHashView() {
   if (location.hash === '#trash') {
     openTrash();
@@ -411,7 +433,7 @@ $('home').addEventListener('click', () => {
   refreshTrashCount();
 });
 
-trashEntryEl.addEventListener('click', () => { location.hash = '#trash'; });
+trashEntryEl.addEventListener('click', showTrash);
 
 window.addEventListener('hashchange', renderHashView);
 
