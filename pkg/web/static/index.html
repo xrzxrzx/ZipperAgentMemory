@@ -43,6 +43,20 @@
     <button type="submit" class="btn-primary">搜索</button>
   </form>
 
+  <!-- 回收站入口放在顶栏：目录树再长也不会把它挤走，永远一屏可见 -->
+  <button id="trash-entry" class="trash-entry" hidden title="打开回收站">
+    <span class="trash-entry-label">
+      <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 4.5h10"/>
+        <path d="M6.2 4.5V3.2h3.6v1.3"/>
+        <path d="M4.4 4.5 5 12.6a1.2 1.2 0 0 0 1.2 1.1h3.6a1.2 1.2 0 0 0 1.2-1.1l.6-8.1"/>
+      </svg>
+      回收站
+    </span>
+    <span id="trash-count" class="count">0</span>
+  </button>
+
   <button id="logout" class="ghost btn-icon" title="退出登录" aria-label="退出登录">
     <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -57,18 +71,6 @@
   <aside class="panel sidebar">
     <div class="side-title">目录</div>
     <div id="sidebar"></div>
-    <button id="trash-entry" class="trash-entry" hidden>
-      <span class="trash-entry-label">
-        <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
-             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M3 4.5h10"/>
-          <path d="M6.2 4.5V3.2h3.6v1.3"/>
-          <path d="M4.4 4.5 5 12.6a1.2 1.2 0 0 0 1.2 1.1h3.6a1.2 1.2 0 0 0 1.2-1.1l.6-8.1"/>
-        </svg>
-        回收站
-      </span>
-      <span id="trash-count" class="count">0</span>
-    </button>
   </aside>
 
   <section id="content" class="panel content">
