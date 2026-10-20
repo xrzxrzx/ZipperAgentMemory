@@ -95,6 +95,9 @@ func New(opts Options) (*Server, error) {
 	mux.Handle("POST /memory/api/restore", s.protected(http.HandlerFunc(s.handleRestore)))
 	mux.Handle("POST /memory/api/purge", s.protected(http.HandlerFunc(s.handlePurge)))
 	mux.Handle("POST /memory/api/trash/clear", s.protected(http.HandlerFunc(s.handleTrashClear)))
+	// 批量操作：一次请求处理多条，逐条报告失败（部分成功不回滚）。
+	mux.Handle("POST /memory/api/trash/purge-batch", s.protected(http.HandlerFunc(s.handleTrashPurgeBatch)))
+	mux.Handle("POST /memory/api/trash/restore-batch", s.protected(http.HandlerFunc(s.handleTrashRestoreBatch)))
 	// GET 兜底修正：下面 `GET /memory/` 是**子树模式**，会把写接口路径的 GET 请求
 	// 抢成页面请求（最终 404），从而拿不到应有的 405。为每个写接口显式注册 GET
 	// 处理器，保证「写接口只接受 POST」这条约束可被外部观测到（需求-006 AC6）。
@@ -103,6 +106,8 @@ func New(opts Options) (*Server, error) {
 		"/memory/api/restore",
 		"/memory/api/purge",
 		"/memory/api/trash/clear",
+		"/memory/api/trash/purge-batch",
+		"/memory/api/trash/restore-batch",
 	} {
 		mux.Handle("GET "+p, s.protected(http.HandlerFunc(s.handleMethodNotAllowed)))
 	}

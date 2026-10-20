@@ -239,12 +239,37 @@ async function refreshTrashCount() {
   }
 }
 
+// selectedIds 是回收站视图里当前勾选的条目（批量操作用）。
+let selectedIds = new Set();
+
 function renderTrashView(entries) {
+  selectedIds = new Set();
+
   const head = el('div', 'trash-head');
   head.appendChild(el('h2', 'trash-title', '回收站'));
   head.appendChild(el('span', 'trash-sub', entries.length + ' 项 · 可恢复'));
   const spacer = el('span', 'spacer');
   head.appendChild(spacer);
+
+  // 批量操作区：未勾选时隐藏，勾选后显示「已选 N 项 + 两个按钮」。
+  const batch = el('span', 'trash-batch');
+  const batchLabel = el('span', 'trash-batch-label', '');
+  const batchRestoreBtn = el('button', 'action', '恢复所选');
+  const batchPurgeBtn = el('button', 'action danger', '清除所选');
+  batchRestoreBtn.addEventListener('click', batchRestore);
+  batchPurgeBtn.addEventListener('click', batchPurge);
+  batch.append(batchLabel, batchRestoreBtn, batchPurgeBtn);
+  batch.hidden = true;
+  head.appendChild(batch);
+
+  const updateBatchBar = () => {
+    const n = selectedIds.size;
+    batch.hidden = n === 0;
+    batchLabel.textContent = '已选 ' + n + ' 项';
+    batchRestoreBtn.textContent = '恢复所选 (' + n + ')';
+    batchPurgeBtn.textContent = '清除所选 (' + n + ')';
+  };
+
   const back = el('button', 'action', '← 返回');
   back.addEventListener('click', showBrowse);
   head.appendChild(back);
@@ -261,12 +286,42 @@ function renderTrashView(entries) {
     const table = el('table', 'trash-table');
     const thead = el('thead');
     const hr = el('tr');
+
+    // 全选复选框
+    const thCheck = el('th', 'pick');
+    const all = el('input');
+    all.type = 'checkbox';
+    all.title = '全选 / 取消全选';
+    all.addEventListener('change', () => {
+      for (const box of tbody.querySelectorAll('input[type="checkbox"]')) {
+        box.checked = all.checked;
+      }
+      selectedIds = all.checked ? new Set(entries.map((e) => e.id)) : new Set();
+      updateBatchBar();
+    });
+    thCheck.appendChild(all);
+    hr.appendChild(thCheck);
     for (const t of ['原路径', '删除时间', '大小', '操作']) hr.appendChild(el('th', null, t));
     thead.appendChild(hr);
     table.appendChild(thead);
+
     const tbody = el('tbody');
     for (const item of entries) {
       const tr = el('tr');
+
+      const tdCheck = el('td', 'pick');
+      const box = el('input');
+      box.type = 'checkbox';
+      box.dataset.id = item.id;
+      box.addEventListener('change', () => {
+        if (box.checked) selectedIds.add(item.id);
+        else selectedIds.delete(item.id);
+        all.checked = selectedIds.size === entries.length;
+        updateBatchBar();
+      });
+      tdCheck.appendChild(box);
+      tr.appendChild(tdCheck);
+
       tr.appendChild(el('td', 'path-cell', item.path));
       tr.appendChild(el('td', 'time', item.deleted_at));
       tr.appendChild(el('td', 'size', String(item.size) + ' 字节'));
@@ -285,6 +340,39 @@ function renderTrashView(entries) {
 
   contentEl.replaceChildren(head, wrap);
   showStatus('回收站 · ' + entries.length + ' 项');
+}
+
+// batchRestore 批量恢复勾选条目。
+async function batchRestore() {
+  const ids = [...selectedIds];
+  if (ids.length === 0) return;
+  if (!window.confirm('恢复选中的 ' + ids.length + ' 项？')) return;
+  try {
+    const res = await apiPost('/memory/api/trash/restore-batch', { ids });
+    let msg = '已恢复 ' + res.succeeded + ' 项';
+    if (res.failed && res.failed.length) msg += '，失败 ' + res.failed.length + ' 项';
+    showStatus(msg);
+    await loadRoot();
+    await openTrash();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+// batchPurge 批量物理删除勾选条目（不可逆）。
+async function batchPurge() {
+  const ids = [...selectedIds];
+  if (ids.length === 0) return;
+  if (!window.confirm('彻底删除选中的 ' + ids.length + ' 项？\n\n此操作不可撤销。')) return;
+  try {
+    const res = await apiPost('/memory/api/trash/purge-batch', { ids });
+    let msg = '已彻底删除 ' + res.succeeded + ' 项';
+    if (res.failed && res.failed.length) msg += '，失败 ' + res.failed.length + ' 项';
+    showStatus(msg);
+    await openTrash();
+  } catch (err) {
+    showError(err);
+  }
 }
 
 async function openTrash() {

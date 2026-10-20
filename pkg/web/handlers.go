@@ -532,6 +532,90 @@ func (s *Server) handleTrashClear(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": n})
 }
 
+// maxBatchIDs 是一次批量操作允许的最大条目数（防止一次请求拖垮进程）。
+const maxBatchIDs = 200
+
+// decodeIDs 解析批量操作的 {"ids":[...]} 请求体；失败时已写出响应。
+func (s *Server) decodeIDs(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	if !sameOriginOK(r) {
+		s.writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+		return nil, false
+	}
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if !s.decodeBody(w, r, &body) {
+		return nil, false
+	}
+	if len(body.IDs) == 0 {
+		s.writeJSONError(w, http.StatusBadRequest, "empty ids")
+		return nil, false
+	}
+	if len(body.IDs) > maxBatchIDs {
+		s.writeJSONError(w, http.StatusBadRequest, "too many ids")
+		return nil, false
+	}
+	return body.IDs, true
+}
+
+// batchResult 是批量操作的统一响应：**部分成功也返回 200**，
+// 逐条报告失败原因，避免一个坏条目让整批回滚。
+type batchResult struct {
+	OK        bool                `json:"ok"`
+	Succeeded int                 `json:"succeeded"`
+	Failed    []map[string]string `json:"failed"`
+}
+
+// handleTrashPurgeBatch 批量物理删除回收站条目。
+func (s *Server) handleTrashPurgeBatch(w http.ResponseWriter, r *http.Request) {
+	ids, ok := s.decodeIDs(w, r)
+	if !ok {
+		return
+	}
+	res := batchResult{OK: true, Failed: []map[string]string{}}
+	for _, id := range ids {
+		if err := s.store.PurgeTrash(id); err != nil {
+			s.logf("web: purge %q: %v", id, err)
+			res.Failed = append(res.Failed, map[string]string{"id": id, "error": err.Error()})
+			continue
+		}
+		res.Succeeded++
+	}
+	s.writeJSON(w, http.StatusOK, res)
+}
+
+// handleTrashRestoreBatch 批量恢复回收站条目（目录会逐个文件重建索引）。
+func (s *Server) handleTrashRestoreBatch(w http.ResponseWriter, r *http.Request) {
+	ids, ok := s.decodeIDs(w, r)
+	if !ok {
+		return
+	}
+	res := batchResult{OK: true, Failed: []map[string]string{}}
+	for _, id := range ids {
+		rel, err := memory.TrashOriginalPath(id)
+		if err != nil {
+			res.Failed = append(res.Failed, map[string]string{"id": id, "error": err.Error()})
+			continue
+		}
+		if err := s.store.RestoreFromTrash(id); err != nil {
+			s.logf("web: restore %q: %v", id, err)
+			res.Failed = append(res.Failed, map[string]string{"id": id, "error": err.Error()})
+			continue
+		}
+		res.Succeeded++
+		if files, walkErr := s.store.WalkFiles(rel); walkErr == nil {
+			for _, f := range files {
+				if err := s.reindexPath(f); err != nil {
+					s.logf("web: batch restore %q: reindex %q failed: %v", id, f, err)
+				}
+			}
+		} else {
+			s.logf("web: batch restore %q: walk failed: %v", id, walkErr)
+		}
+	}
+	s.writeJSON(w, http.StatusOK, res)
+}
+
 // reindexPath 重新索引一个刚恢复的文件（索引是派生状态，读失败即返回错误由调用方记日志）。
 func (s *Server) reindexPath(rel string) error {
 	data, err := s.store.Read(rel)

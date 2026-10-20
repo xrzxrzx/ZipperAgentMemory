@@ -217,7 +217,90 @@ func TestTrashDeleteOutsideRootRejected(t *testing.T) {
 	}
 }
 
-// TestTrashDeleteDirectory 目录连同其全部内容进回收站，可整体恢复（A 方案）。
+// TestTrashBatchPurgeAndRestore 批量清除 / 批量恢复（部分成功也返回 200）。
+func TestTrashBatchPurgeAndRestore(t *testing.T) {
+	srv, root := newTrashServer(t)
+	if err := os.WriteFile(filepath.Join(root, "notes", "b.md"), []byte("# B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"notes/a.md", "notes/b.md"} {
+		if rec := trashReq(srv, http.MethodPost, "/memory/api/delete", map[string]string{"path": p}, "", true); rec.Code != http.StatusOK {
+			t.Fatalf("准备删除 %s 失败：%d", p, rec.Code)
+		}
+	}
+
+	ids := trashIDs(t, srv)
+	if len(ids) != 2 {
+		t.Fatalf("应有 2 条，实际 %d", len(ids))
+	}
+
+	// 批量恢复
+	rec := trashReq(srv, http.MethodPost, "/memory/api/trash/restore-batch", map[string]any{"ids": ids}, "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore-batch = %d, want 200；body=%s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Succeeded int   `json:"succeeded"`
+		Failed    []any `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	if res.Succeeded != 2 || len(res.Failed) != 0 {
+		t.Fatalf("应恢复 2 条且无失败，实际 %+v", res)
+	}
+	for _, n := range []string{"a.md", "b.md"} {
+		if _, err := os.Stat(filepath.Join(root, "notes", n)); err != nil {
+			t.Errorf("恢复后 %s 应存在", n)
+		}
+	}
+
+	// 再删一次，批量清除
+	for _, p := range []string{"notes/a.md", "notes/b.md"} {
+		trashReq(srv, http.MethodPost, "/memory/api/delete", map[string]string{"path": p}, "", true)
+	}
+	ids = trashIDs(t, srv)
+	rec = trashReq(srv, http.MethodPost, "/memory/api/trash/purge-batch", map[string]any{"ids": ids}, "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("purge-batch = %d, want 200；body=%s", rec.Code, rec.Body.String())
+	}
+	if got := trashIDs(t, srv); len(got) != 0 {
+		t.Fatalf("清除后应为空，实际 %d", len(got))
+	}
+
+	// 空 ids 应 400
+	rec = trashReq(srv, http.MethodPost, "/memory/api/trash/purge-batch", map[string]any{"ids": []string{}}, "", true)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("空 ids = %d, want 400", rec.Code)
+	}
+	// GET 应 405
+	rec = trashReq(srv, http.MethodGet, "/memory/api/trash/restore-batch", nil, "", true)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET restore-batch = %d, want 405", rec.Code)
+	}
+}
+
+// trashIDs 取回收站当前全部条目 ID。
+func trashIDs(t *testing.T, srv *Server) []string {
+	t.Helper()
+	rec := trashReq(srv, http.MethodGet, "/memory/api/trash", nil, "", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list trash = %d", rec.Code)
+	}
+	var list struct {
+		Entries []struct {
+			ID string `json:"id"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("解析回收站: %v", err)
+	}
+	ids := make([]string, 0, len(list.Entries))
+	for _, e := range list.Entries {
+		ids = append(ids, e.ID)
+	}
+	return ids
+}
 func TestTrashDeleteDirectory(t *testing.T) {
 	srv, root := newTrashServer(t)
 	if err := os.WriteFile(filepath.Join(root, "notes", "b.md"), []byte("# B"), 0o644); err != nil {
