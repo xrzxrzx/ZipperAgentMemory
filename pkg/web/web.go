@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +69,18 @@ func New(opts Options) (*Server, error) {
 	// 公开路由：登录页与登录接口（本身不含任何库内容）。
 	mux.HandleFunc("GET /memory/login", s.handleLoginPage)
 	mux.HandleFunc("POST /memory/api/login", s.handleLogin)
+	// 公开的站点图标：浏览器在**登录前**就会取标签页图标，未登录的登录页也没有 Cookie，
+	// 故图标不走鉴权。只暴露这两个固定的图片文件（用户头像），不含任何库内容。
+	favicon, err := embeddedIcon("static/icons/favicon.ico", "image/x-icon")
+	if err != nil {
+		return nil, err
+	}
+	touchIcon, err := embeddedIcon("static/icons/apple-touch-icon.png", "image/png")
+	if err != nil {
+		return nil, err
+	}
+	mux.HandleFunc("GET /memory/favicon.ico", favicon)
+	mux.HandleFunc("GET /memory/apple-touch-icon.png", touchIcon)
 	// 其余一律需口令。
 	mux.Handle("POST /memory/api/logout", s.protected(http.HandlerFunc(s.handleLogout)))
 	mux.Handle("GET /memory/api/status", s.protected(http.HandlerFunc(s.handleStatus)))
@@ -109,6 +122,24 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleMethodNotAllowed(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Allow", "POST")
 	s.writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+// embeddedIcon 把内嵌的图标文件包成一个只读处理器（公开路由用）。
+// 图标是静态展示资源，单独给一天的可缓存头：默认的 no-store 面向含库内容的响应，
+// 对图标既无必要，也会让每次开页面都重新拉一遍。
+func embeddedIcon(name, contentType string) (http.HandlerFunc, error) {
+	data, err := staticFiles.ReadFile(name)
+	if err != nil {
+		return nil, fmt.Errorf("web: embedded icon %q: %w", name, err)
+	}
+	size := strconv.Itoa(len(data))
+	return func(w http.ResponseWriter, _ *http.Request) {
+		h := w.Header()
+		h.Set("Content-Type", contentType)
+		h.Set("Cache-Control", "public, max-age=86400")
+		h.Set("Content-Length", size)
+		_, _ = w.Write(data)
+	}, nil
 }
 
 // protected 包装需口令的路由：凭据有效放行；否则浏览器导航跳登录页、

@@ -783,6 +783,10 @@ func TestIndexPageShell(t *testing.T) {
 // TestLoginPageSelfContained 验收（独立验证 P2-1 修复）：公开登录页必须自带样式，
 // **不得外链** `/memory/static/*`——静态资源需认证（design.md §11.4），
 // 浏览器取样式表时发 `Accept: text/css`，会被 401 拦掉，导致登录页无样式裸奔。
+//
+// 需求-007 起登录页有两条 `<link>`：站点图标与 iOS 触摸图标。它们是**公开路由**
+// （`/memory/favicon.ico`、`/memory/apple-touch-icon.png`，未登录可取，见 TestPublicIcons），
+// 不在需认证的 `/memory/static/*` 之下，故与本用例的本意不冲突。此处按白名单精确放行。
 func TestLoginPageSelfContained(t *testing.T) {
 	env := newTestEnv(t)
 	res := env.do(t, http.MethodGet, "/memory/login", "", "text/html")
@@ -792,10 +796,23 @@ func TestLoginPageSelfContained(t *testing.T) {
 	}
 	page := string(body)
 	// 精确判定「外链」：注释里提到该路径属文档说明，不算引用。
-	for _, ref := range []string{`<link`, `href="/memory/static/`, `src="/memory/static/`} {
+	for _, ref := range []string{`href="/memory/static/`, `src="/memory/static/`} {
 		if strings.Contains(page, ref) {
 			t.Errorf("登录页不应外链需认证的静态资源（命中 %q）", ref)
 		}
+	}
+	// 图标白名单：只允许这两条（都是公开路由）。
+	allowedLinks := []string{
+		`<link rel="icon" href="/memory/favicon.ico" sizes="any">`,
+		`<link rel="apple-touch-icon" href="/memory/apple-touch-icon.png">`,
+	}
+	for _, want := range allowedLinks {
+		if !strings.Contains(page, want) {
+			t.Errorf("登录页缺少图标引用 %q", want)
+		}
+	}
+	if got := strings.Count(page, "<link"); got != len(allowedLinks) {
+		t.Errorf("登录页 <link> 数量 = %d，want %d（只允许上面两条公开图标）", got, len(allowedLinks))
 	}
 	if !strings.Contains(page, "<style>") {
 		t.Error("登录页应内联样式")
@@ -803,6 +820,67 @@ func TestLoginPageSelfContained(t *testing.T) {
 	// 反向确认：真实浏览器取样式表的 Accept 头确实拿不到静态资源（设计如此）。
 	if res := env.do(t, http.MethodGet, "/memory/static/style.css", "", "text/css,*/*;q=0.1"); res.StatusCode == http.StatusOK {
 		t.Error("静态资源不应在未授权时可读（若放宽了认证声明，需同步 design.md §11.4）")
+	}
+}
+
+// TestPublicIcons 验收（需求-007）：站点图标走**公开**路由——浏览器在登录前就会取
+// 标签页图标，未登录的登录页没有 Cookie，若图标需认证则登录页永远显示不出图标。
+// 同时验证：图标只暴露图片本身，且同一文件放在 `/memory/static/icons/` 下仍受鉴权保护。
+func TestPublicIcons(t *testing.T) {
+	env := newTestEnv(t)
+
+	cases := []struct {
+		path        string
+		contentType string
+		magic       []byte
+	}{
+		// ICO 文件头：00 00 01 00
+		{"/memory/favicon.ico", "image/x-icon", []byte{0x00, 0x00, 0x01, 0x00}},
+		// PNG 文件头：89 50 4E 47
+		{"/memory/apple-touch-icon.png", "image/png", []byte{0x89, 'P', 'N', 'G'}},
+	}
+	for _, c := range cases {
+		// 不带口令
+		res := env.do(t, http.MethodGet, c.path, "", "image/*")
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("%s（未登录）= %d，want 200（图标必须公开，否则登录页无图标）", c.path, res.StatusCode)
+			continue
+		}
+		if ct := res.Header.Get("Content-Type"); ct != c.contentType {
+			t.Errorf("%s Content-Type = %q，want %q", c.path, ct, c.contentType)
+		}
+		if cc := res.Header.Get("Cache-Control"); !strings.Contains(cc, "public") {
+			t.Errorf("%s Cache-Control = %q，want 含 public（图标可缓存）", c.path, cc)
+		}
+		body, err := io.ReadAll(res.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) < 500 || !bytes.HasPrefix(body, c.magic) {
+			t.Errorf("%s 内容不像图标（长度 %d，前缀 %x）", c.path, len(body), body[:min(4, len(body))])
+		}
+	}
+
+	// 同一批文件放在需认证的静态目录下，仍必须 401（公开的只是那两个固定路由）。
+	for _, p := range []string{"/memory/static/icons/favicon.ico", "/memory/static/icons/apple-touch-icon.png"} {
+		if res := env.do(t, http.MethodGet, p, "", "image/*"); res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s（未登录）= %d，want 401（静态目录仍需鉴权）", p, res.StatusCode)
+		}
+	}
+
+	// 端到端：登录页里引用的图标地址真的取得到。
+	res := env.do(t, http.MethodGet, "/memory/login", "", "text/html")
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/memory/favicon.ico", "/memory/apple-touch-icon.png"} {
+		if !strings.Contains(string(body), `href="`+p+`"`) {
+			t.Errorf("登录页未引用图标 %s", p)
+		}
+		if r := env.do(t, http.MethodGet, p, "", "image/*"); r.StatusCode != http.StatusOK {
+			t.Errorf("登录页引用的 %s 未登录取不到（%d）", p, r.StatusCode)
+		}
 	}
 }
 

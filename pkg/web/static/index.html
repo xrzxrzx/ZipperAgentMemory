@@ -6,6 +6,11 @@
 <!-- 让浏览器原生控件（滚动条、下拉框、日期选择等）也用暗色渲染 -->
 <meta name="color-scheme" content="dark">
 <title>记忆库</title>
+<!-- 网站图标：用户头像（多分辨率 ICO：16/24/32/48/64/128 六档）+ iOS 触摸图标。
+     走公开只读路由 /memory/favicon.ico：浏览器在登录前就会取标签页图标，
+     未登录的登录页没有 Cookie，故图标不经鉴权（只暴露图片本身，不含库内容）。 -->
+<link rel="icon" href="/memory/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/memory/apple-touch-icon.png">
 <link rel="stylesheet" href="/memory/static/style.css">
 </head>
 <body>

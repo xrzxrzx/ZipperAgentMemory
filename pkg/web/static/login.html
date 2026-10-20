@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>记忆库 · 登录</title>
+<!-- 网站图标：用户头像（多分辨率 ICO：16/24/32/48/64/128 六档）+ iOS 触摸图标。
+     走公开只读路由 /memory/favicon.ico：浏览器在登录前就会取标签页图标，
+     未登录的登录页没有 Cookie，故图标不经鉴权（只暴露图片本身，不含库内容）。 -->
+<link rel="icon" href="/memory/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/memory/apple-touch-icon.png">
 <!--
   样式内联在页面里：登录页是**公开**路由，而 /memory/static/* 需要口令
   （design.md §11.4），外链样式表会被 401 拦掉，导致登录页裸奔。
